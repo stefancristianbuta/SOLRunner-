@@ -45,30 +45,40 @@ async function trackedFetch(moduleName, url, optional = false) {
   }
 }
 
-function scorePair(pair, ageMin, liquidity, volume, buys, sells) {
+function scorePair(pair, ageMin, liquidity, volume, buys, sells, signal = {}) {
   const total = buys + sells;
   const buyShare = total ? buys / total : 0;
   const volumeLiquidity = volume / Math.max(liquidity, 1);
   const activity = clamp(Math.log10(total + 1) / 2.4, 0, 1);
   const liquidityQuality = clamp(Math.log10(liquidity / MIN_LIQUIDITY_USD + 1) / 1.2, 0, 1);
-  const momentum = clamp((n(pair.priceChange?.m5) + 10) / 40, 0, 1);
-  const freshness = 1; // Age is metadata only; do not penalize older runners.
+  const momentum5m = clamp((n(pair.priceChange?.m5) + 5) / 25, 0, 1);
+  const momentum1h = clamp((n(pair.priceChange?.h1) + 5) / 35, 0, 1);
   const buyPressure = clamp((buyShare - 0.35) / 0.5, 0, 1);
-  const volPulse = clamp(volumeLiquidity / 2, 0, 1);
-  return Math.round(buyPressure * 25 + (volPulse * 0.6 + activity * 0.4) * 25 + liquidityQuality * 20 + freshness * 10 + momentum * 10 + (total >= 20 ? 10 : total / 2));
+  const volPulse = clamp(volumeLiquidity / 1.5, 0, 1);
+  const buyers = n(signal.buyers), sellers = n(signal.sellers);
+  const uniqueBuyerSignal = buyers + sellers > 0 ? clamp((buyers / Math.max(buyers + sellers, 1) - 0.35) / 0.5, 0, 1) : null;
+  // Organic-momentum heuristic: favor sustained activity, rising volume and broad buyer participation.
+  // Missing unique-wallet data is neutral, not proof of organic demand.
+  const organic = uniqueBuyerSignal === null ? 0.5 : uniqueBuyerSignal;
+  const score = buyPressure * 20 + (volPulse * 0.55 + activity * 0.45) * 20 +
+    liquidityQuality * 15 + (momentum5m * 0.65 + momentum1h * 0.35) * 20 +
+    organic * 15 + clamp(total / 30, 0, 1) * 10;
+  return Math.round(clamp(score, 0, 100));
 }
 
 async function loadCandidates() {
   const runStart = Date.now();
   telemetry.lastRunAt = new Date().toISOString();
 
-  // Discover newly created pools directly, rather than relying only on promoted token profiles.
-  // GeckoTerminal indexes new pools across Solana DEXes; DexScreener enriches market metadata.
-  const geckoPages = await Promise.all([1, 2, 3].map(page =>
-    trackedFetch("geckoterminal_new_pools_p" + page,
-      "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=" + page, true)
-  ));
-  const geckoPools = geckoPages.flatMap(result => Array.isArray(result?.data) ? result.data : []);
+  // Multi-signal discovery: new pools plus pools trending over 5m/1h and high-activity pools.
+  // GeckoTerminal's public API is rate-limited, so keep discovery to four calls per refresh.
+  const geckoResults = await Promise.all([
+    trackedFetch("geckoterminal_new_pools", "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1", true),
+    trackedFetch("geckoterminal_trending_5m", "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=5m", true),
+    trackedFetch("geckoterminal_trending_1h", "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=1h", true),
+    trackedFetch("geckoterminal_active_pools", "https://api.geckoterminal.com/api/v2/networks/solana/pools?sort=h24_tx_count_desc&page=1", true)
+  ]);
+  const geckoPools = geckoResults.flatMap((result, index) => Array.isArray(result?.data) ? result.data.map(pool => ({ ...pool, __solrunnerSource: ["geckoterminal_new_pool", "geckoterminal_trending_5m", "geckoterminal_trending_1h", "geckoterminal_active_pool"][index] })) : []);
   const geckoByAddress = new Map();
   for (const pool of geckoPools) {
     const attrs = pool.attributes || {};
@@ -81,6 +91,7 @@ async function loadCandidates() {
     const ageMin = Number.isFinite(createdAt) ? (Date.now() - createdAt) / 60000 : null;
     const reserveUsd = n(attrs.reserve_in_usd);
     if (ageMin !== null && ageMin >= 0 && reserveUsd >= MIN_LIQUIDITY_USD) {
+      const source = pool.__solrunnerSource || "geckoterminal_pool";
       const old = geckoByAddress.get(mint);
       if (!old || reserveUsd > old.liquidityUsd) geckoByAddress.set(mint, {
         mint, pairAddress: attrs.address || String(pool.id || "").replace(/^solana_/, ""),
@@ -89,7 +100,7 @@ async function loadCandidates() {
         volume6h: n(attrs.volume_usd?.h6), volume24h: n(attrs.volume_usd?.h24),
         change5m: n(attrs.price_change_percentage?.m5), change1h: n(attrs.price_change_percentage?.h1),
         change6h: n(attrs.price_change_percentage?.h6), change24h: n(attrs.price_change_percentage?.h24),
-        txns: attrs.transactions || {}, poolCreatedAt: createdAt, source: "geckoterminal_new_pool"
+        txns: attrs.transactions || {}, poolCreatedAt: createdAt, source
       });
     }
   }
@@ -141,6 +152,9 @@ async function loadCandidates() {
     counts.eligiblePairs++;
     const mint = pair.baseToken.address, volume = pair.volume || {}, txns = pair.txns || {}, changes = pair.priceChange || {}, info = pair.info || {};
     const buys5 = n(txns.m5?.buys), sells5 = n(txns.m5?.sells);
+    const geckoSignal = geckoByAddress.get(mint) || {};
+    const geckoM5 = geckoSignal.txns?.m5 || {};
+    const geckoH1 = geckoSignal.txns?.h1 || {};
     const candidate = {
       symbol: String(pair.baseToken.symbol || "UNKNOWN").slice(0, 24),
       name: String(pair.baseToken.name || pair.baseToken.symbol || "Unknown token").slice(0, 80),
@@ -155,11 +169,13 @@ async function loadCandidates() {
       change5m: n(changes.m5), change1h: n(changes.h1), change6h: n(changes.h6), change24h: n(changes.h24),
       volume5m: n(volume.m5), volume1h: n(volume.h1), volume6h: n(volume.h6), volume24h: n(volume.h24),
       liquidityUsd: liquidity, buys5m: buys5, sells5m, txns5m: buys5 + sells5,
+      uniqueBuyers5m: n(geckoM5.buyers) || null, uniqueSellers5m: n(geckoM5.sellers) || null,
+      uniqueBuyers1h: n(geckoH1.buyers) || null, uniqueSellers1h: n(geckoH1.sellers) || null,
       buys1h: n(txns.h1?.buys), sells1h: n(txns.h1?.sells), txns1h: n(txns.h1?.buys) + n(txns.h1?.sells),
       buys6h: n(txns.h6?.buys), sells6h: n(txns.h6?.sells), txns6h: n(txns.h6?.buys) + n(txns.h6?.sells),
       buys24h: n(txns.h24?.buys), sells24h: n(txns.h24?.sells), txns24h: n(txns.h24?.buys) + n(txns.h24?.sells),
       buySellRatio: Number(((buys5 + 1) / (sells5 + 1)).toFixed(2)),
-      score: scorePair(pair, ageMin, liquidity, n(volume.m5), buys5, sells5),
+      score: scorePair(pair, ageMin, liquidity, n(volume.m5), buys5, sells5, { buyers: geckoM5.buyers, sellers: geckoM5.sellers }),
       riskStatus: "UNVERIFIED", smartMoney: "NOT VERIFIED", holderCount: null,
       reasons: ["Discovered from live pool/token feeds", buys5 > sells5 ? "More buys than sells in the last 5 minutes" : "Buy pressure is not confirmed", "Security and wallet attribution are not audited by this feed"]
     };
@@ -173,7 +189,7 @@ async function loadCandidates() {
     const tx = g.txns || {};
     const buys5 = n(tx.m5?.buys), sells5 = n(tx.m5?.sells);
     const pairLike = { priceChange: { m5: g.change5m } };
-    const score = scorePair(pairLike, g.ageMin, g.liquidityUsd, g.volume5m, buys5, sells5);
+    const score = scorePair(pairLike, g.ageMin, g.liquidityUsd, g.volume5m, buys5, sells5, { buyers: tx.m5?.buyers, sellers: tx.m5?.sellers });
     best.set(mint, {
       symbol: "NEW", name: g.name.split(" / ")[0] || "New Solana token", mint,
       pairAddress: g.pairAddress, dexId: g.dexId, chainId: "solana",
@@ -184,6 +200,8 @@ async function loadCandidates() {
       change5m: g.change5m, change1h: g.change1h, change6h: g.change6h, change24h: g.change24h,
       volume5m: g.volume5m, volume1h: g.volume1h, volume6h: g.volume6h, volume24h: g.volume24h,
       liquidityUsd: g.liquidityUsd, buys5m: buys5, sells5m, txns5m: buys5 + sells5,
+      uniqueBuyers5m: n(tx.m5?.buyers) || null, uniqueSellers5m: n(tx.m5?.sellers) || null,
+      uniqueBuyers1h: n(tx.h1?.buyers) || null, uniqueSellers1h: n(tx.h1?.sellers) || null,
       buys1h: n(tx.h1?.buys), sells1h: n(tx.h1?.sells), txns1h: n(tx.h1?.buys) + n(tx.h1?.sells),
       buys6h: n(tx.h6?.buys), sells6h: n(tx.h6?.sells), txns6h: n(tx.h6?.buys) + n(tx.h6?.sells),
       buys24h: n(tx.h24?.buys), sells24h: n(tx.h24?.sells), txns24h: n(tx.h24?.buys) + n(tx.h24?.sells),
@@ -202,13 +220,13 @@ async function loadCandidates() {
   return tokens;
 }
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "SOLRunner", dataProvider: "GeckoTerminal + DexScreener", cached: Boolean(cache.payload), lastUpdated: cache.at || null }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "SOLRunner", dataProvider: "GeckoTerminal new/trending/active pools + DexScreener", cached: Boolean(cache.payload), lastUpdated: cache.at || null }));
 app.get("/api/tokens", async (_req, res) => {
   res.set("Cache-Control", "no-store");
   if (cache.payload && Date.now() - cache.at < CACHE_MS) return res.json({ ...cache.payload, cached: true });
   try {
     const tokens = await loadCandidates();
-    cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new pools + DexScreener public API", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
+    cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new/trending/active pools + DexScreener public API", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
     lastError = null;
     return res.json({ ...cache.payload, cached: false });
   } catch (error) {
