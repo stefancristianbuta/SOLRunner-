@@ -116,6 +116,12 @@ async function loadCandidates() {
   const profiles = (Array.isArray(profilesRaw) ? profilesRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
   const latest = (Array.isArray(latestRaw) ? latestRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
   const top = (Array.isArray(topRaw) ? topRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
+  const tokenMetadata = new Map();
+  for (const item of [...profiles, ...latest, ...top]) {
+    if (!item?.tokenAddress) continue;
+    const old = tokenMetadata.get(item.tokenAddress) || {};
+    tokenMetadata.set(item.tokenAddress, { icon: item.icon || old.icon || null, header: item.header || old.header || null });
+  }
   const sourceMap = new Map();
   const addSource = (address, source) => {
     if (!sourceMap.has(address)) sourceMap.set(address, new Set());
@@ -181,7 +187,7 @@ async function loadCandidates() {
       name: String(pair.baseToken.name || pair.baseToken.symbol || "Unknown token").slice(0, 80),
       mint, pairAddress: pair.pairAddress, dexId: pair.dexId || "unknown", chainId: pair.chainId || "solana",
       url: pair.url || "https://dexscreener.com/solana/" + pair.pairAddress,
-      imageUrl: info.imageUrl || null, header: info.header || null, openGraph: info.openGraph || null,
+      imageUrl: info.imageUrl || tokenMetadata.get(mint)?.icon || null, header: info.header || tokenMetadata.get(mint)?.header || null, openGraph: info.openGraph || null,
       websites: (Array.isArray(info.websites) ? info.websites : []).slice(0, 8),
       socials: (Array.isArray(info.socials) ? info.socials : []).slice(0, 10),
       sources: [...(sourceMap.get(mint) || [])],
@@ -215,7 +221,7 @@ async function loadCandidates() {
       symbol: "NEW", name: g.name.split(" / ")[0] || "New Solana token", mint,
       pairAddress: g.pairAddress, dexId: g.dexId, chainId: "solana",
       url: "https://www.geckoterminal.com/solana/pools/" + g.pairAddress,
-      imageUrl: null, websites: [], socials: [], sources: ["geckoterminal_new_pool"],
+      imageUrl: tokenMetadata.get(mint)?.icon || null, header: tokenMetadata.get(mint)?.header || null, websites: [], socials: [], sources: ["geckoterminal_new_pool"],
       ageMin: Math.round(g.ageMin * 10) / 10, pairCreatedAt: g.poolCreatedAt,
       priceUsd: 0, priceNative: null, marketCapUsd: 0, fdvUsd: 0,
       change5m: g.change5m, change1h: g.change1h, change6h: g.change6h, change24h: g.change24h,
