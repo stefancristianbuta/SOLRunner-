@@ -10,7 +10,7 @@ let lastError = null;
 const telemetry = { lastRunAt: null, lastDurationMs: null, runs: 0, failures: 0, modules: {}, lastPipeline: {} };
 
 app.disable("x-powered-by");
-app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true }));
+app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true, setHeaders(res, filePath) { if (filePath.endsWith(".html")) res.setHeader("Cache-Control", "no-store, max-age=0, must-revalidate"); } }));
 const n = value => Number.isFinite(Number(value)) ? Number(value) : 0;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const addressFromGeckoId = id => String(id || "").startsWith("solana_") ? String(id).slice(7) : "";
@@ -105,10 +105,13 @@ async function loadCandidates() {
     }
   }
 
-  const [profilesRaw, latestRaw, topRaw] = await Promise.all([
+  const [profilesRaw, latestRaw, topRaw, searchSolUsdc, searchSolUsdt, searchSol] = await Promise.all([
     trackedFetch("token_profiles_latest", "https://api.dexscreener.com/token-profiles/latest/v1", true),
     trackedFetch("boosts_latest", "https://api.dexscreener.com/token-boosts/latest/v1", true),
-    trackedFetch("boosts_top", "https://api.dexscreener.com/token-boosts/top/v1", true)
+    trackedFetch("boosts_top", "https://api.dexscreener.com/token-boosts/top/v1", true),
+    trackedFetch("dex_search_sol_usdc", "https://api.dexscreener.com/latest/dex/search?q=SOL/USDC", true),
+    trackedFetch("dex_search_sol_usdt", "https://api.dexscreener.com/latest/dex/search?q=SOL/USDT", true),
+    trackedFetch("dex_search_sol", "https://api.dexscreener.com/latest/dex/search?q=SOL", true)
   ]);
   const profiles = (Array.isArray(profilesRaw) ? profilesRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
   const latest = (Array.isArray(latestRaw) ? latestRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
@@ -121,7 +124,17 @@ async function loadCandidates() {
   for (const [source, list] of [["profile", profiles], ["boost_latest", latest], ["boost_top", top]]) {
     for (const item of list) addSource(item.tokenAddress, source);
   }
-  for (const address of geckoByAddress.keys()) addSource(address, "geckoterminal_new_pool");
+  for (const address of geckoByAddress.keys()) addSource(address, "geckoterminal_pool");
+
+  // Search-based fallback helps keep the feed populated when new/trending endpoints are sparse.
+  // Search results are not trusted by themselves: all candidates still pass chain, pair, and liquidity checks.
+  const searchPairs = [searchSolUsdc, searchSolUsdt, searchSol]
+    .flatMap(result => Array.isArray(result?.pairs) ? result.pairs : [])
+    .filter(pair => pair.chainId === "solana" && pair.baseToken?.address && pair.pairAddress);
+  for (const pair of searchPairs) {
+    addSource(pair.baseToken.address, "dexscreener_search");
+    if (pair.quoteToken?.address) addSource(pair.quoteToken.address, "dexscreener_search");
+  }
 
   // Prioritize tokens from newly created pools, then fill remaining capacity with DexScreener discovery.
   const geckoAddresses = [...geckoByAddress.keys()];
@@ -131,11 +144,19 @@ async function loadCandidates() {
     trackedFetch("dexscreener_pairs_batch_" + (i + 1),
       "https://api.dexscreener.com/tokens/v1/solana/" + addresses.slice(i * 30, (i + 1) * 30).join(","), true)
   ));
-  const pairs = pairBatches.flatMap(result => Array.isArray(result) ? result : []);
+  const enrichedPairs = pairBatches.flatMap(result => Array.isArray(result) ? result : []);
+  // Merge direct search results as a fallback; de-duplicate by pair address.
+  const pairMap = new Map();
+  for (const pair of [...searchPairs, ...enrichedPairs]) {
+    if (!pair?.pairAddress) continue;
+    const old = pairMap.get(pair.pairAddress);
+    if (!old || n(pair.liquidity?.usd) > n(old.liquidity?.usd)) pairMap.set(pair.pairAddress, pair);
+  }
+  const pairs = [...pairMap.values()];
   const now = Date.now();
   const best = new Map();
   const counts = {
-    geckoPoolsReceived: geckoPools.length, geckoNewPoolsEligible: geckoByAddress.size,
+    geckoPoolsReceived: geckoPools.length, geckoNewPoolsEligible: geckoByAddress.size, dexSearchPairs: searchPairs.length,
     profileTokens: profiles.length, latestBoostTokens: latest.length, topBoostTokens: top.length,
     uniqueAddresses: sourceMap.size, addressesRequested: addresses.length, pairsReceived: pairs.length,
     rejectedMissingFields: 0, rejectedFuture: 0, rejectedLowLiquidity: 0,
@@ -220,13 +241,13 @@ async function loadCandidates() {
   return tokens;
 }
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "SOLRunner", dataProvider: "GeckoTerminal new/trending/active pools + DexScreener", cached: Boolean(cache.payload), lastUpdated: cache.at || null }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "SOLRunner", dataProvider: "GeckoTerminal discovery + DexScreener search/market APIs", cached: Boolean(cache.payload), lastUpdated: cache.at || null }));
 app.get("/api/tokens", async (_req, res) => {
   res.set("Cache-Control", "no-store");
   if (cache.payload && Date.now() - cache.at < CACHE_MS) return res.json({ ...cache.payload, cached: true });
   try {
     const tokens = await loadCandidates();
-    cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new/trending/active pools + DexScreener public API", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
+    cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new/trending/active pools + DexScreener search and market APIs", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
     lastError = null;
     return res.json({ ...cache.payload, cached: false });
   } catch (error) {
