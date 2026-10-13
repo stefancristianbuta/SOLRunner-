@@ -1,0 +1,10 @@
+{
+  "name": "solrunner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mobile-first Solana early runner radar",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=20" },
+  "dependencies": { "express": "^4.21.2" }
+}
