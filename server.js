@@ -2,7 +2,10 @@ const express = require("express");
 const path = require("path");
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const CACHE_MS = 12_000;
+const CACHE_MS = 30_000;
+const MAX_AGE_MIN = 30;
+const MIN_LIQUIDITY_USD = 20_000;
+const MAX_ADDRESSES = 240;
 let cache = { at: 0, payload: null };
 let lastError = null;
 const telemetry = { lastRunAt: null, lastDurationMs: null, runs: 0, failures: 0, modules: {}, lastPipeline: {} };
@@ -11,13 +14,17 @@ app.disable("x-powered-by");
 app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true }));
 const n = value => Number.isFinite(Number(value)) ? Number(value) : 0;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const addressFromGeckoId = id => String(id || "").startsWith("solana_") ? String(id).slice(7) : "";
 
 async function trackedFetch(moduleName, url, optional = false) {
   const start = Date.now();
   const entry = telemetry.modules[moduleName] || { calls: 0, successes: 0, failures: 0, lastMs: null, avgMs: null, lastStatus: "never", lastError: null };
   entry.calls++;
   try {
-    const response = await fetch(url, { headers: { accept: "application/json", "user-agent": "SOLRunner/0.3" }, signal: AbortSignal.timeout(9000) });
+    const response = await fetch(url, {
+      headers: { accept: "application/json", "user-agent": "SOLRunner/0.4" },
+      signal: AbortSignal.timeout(9000)
+    });
     if (!response.ok) throw new Error("HTTP " + response.status);
     const data = await response.json();
     const ms = Date.now() - start;
@@ -34,7 +41,7 @@ async function trackedFetch(moduleName, url, optional = false) {
     entry.lastStatus = optional ? "degraded" : "error";
     entry.lastError = String(error.message || error);
     telemetry.modules[moduleName] = entry;
-    if (optional) return [];
+    if (optional) return null;
     throw error;
   }
 }
@@ -44,9 +51,9 @@ function scorePair(pair, ageMin, liquidity, volume, buys, sells) {
   const buyShare = total ? buys / total : 0;
   const volumeLiquidity = volume / Math.max(liquidity, 1);
   const activity = clamp(Math.log10(total + 1) / 2.4, 0, 1);
-  const liquidityQuality = clamp(Math.log10(liquidity / 20000 + 1) / 1.2, 0, 1);
+  const liquidityQuality = clamp(Math.log10(liquidity / MIN_LIQUIDITY_USD + 1) / 1.2, 0, 1);
   const momentum = clamp((n(pair.priceChange?.m5) + 10) / 40, 0, 1);
-  const freshness = clamp(1 - ageMin / 30, 0, 1);
+  const freshness = clamp(1 - ageMin / MAX_AGE_MIN, 0, 1);
   const buyPressure = clamp((buyShare - 0.35) / 0.5, 0, 1);
   const volPulse = clamp(volumeLiquidity / 2, 0, 1);
   return Math.round(buyPressure * 25 + (volPulse * 0.6 + activity * 0.4) * 25 + liquidityQuality * 20 + freshness * 10 + momentum * 10 + (total >= 20 ? 10 : total / 2));
@@ -55,8 +62,41 @@ function scorePair(pair, ageMin, liquidity, volume, buys, sells) {
 async function loadCandidates() {
   const runStart = Date.now();
   telemetry.lastRunAt = new Date().toISOString();
+
+  // Discover newly created pools directly, rather than relying only on promoted token profiles.
+  // GeckoTerminal indexes new pools across Solana DEXes; DexScreener enriches market metadata.
+  const geckoPages = await Promise.all([1, 2, 3].map(page =>
+    trackedFetch("geckoterminal_new_pools_p" + page,
+      "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=" + page, true)
+  ));
+  const geckoPools = geckoPages.flatMap(result => Array.isArray(result?.data) ? result.data : []);
+  const geckoByAddress = new Map();
+  for (const pool of geckoPools) {
+    const attrs = pool.attributes || {};
+    const rel = pool.relationships || {};
+    const baseId = rel.base_token?.data?.id;
+    const quoteId = rel.quote_token?.data?.id;
+    const mint = addressFromGeckoId(baseId);
+    if (!mint) continue;
+    const createdAt = Date.parse(attrs.pool_created_at || "");
+    const ageMin = Number.isFinite(createdAt) ? (Date.now() - createdAt) / 60000 : null;
+    const reserveUsd = n(attrs.reserve_in_usd);
+    if (ageMin !== null && ageMin >= 0 && ageMin <= MAX_AGE_MIN && reserveUsd >= MIN_LIQUIDITY_USD) {
+      const old = geckoByAddress.get(mint);
+      if (!old || reserveUsd > old.liquidityUsd) geckoByAddress.set(mint, {
+        mint, pairAddress: attrs.address || String(pool.id || "").replace(/^solana_/, ""),
+        ageMin, liquidityUsd: reserveUsd, name: attrs.name || "", dexId: rel.dex?.data?.id || "geckoterminal",
+        volume5m: n(attrs.volume_usd?.m5), volume1h: n(attrs.volume_usd?.h1),
+        volume6h: n(attrs.volume_usd?.h6), volume24h: n(attrs.volume_usd?.h24),
+        change5m: n(attrs.price_change_percentage?.m5), change1h: n(attrs.price_change_percentage?.h1),
+        change6h: n(attrs.price_change_percentage?.h6), change24h: n(attrs.price_change_percentage?.h24),
+        txns: attrs.transactions || {}, poolCreatedAt: createdAt, source: "geckoterminal_new_pool"
+      });
+    }
+  }
+
   const [profilesRaw, latestRaw, topRaw] = await Promise.all([
-    trackedFetch("token_profiles_latest", "https://api.dexscreener.com/token-profiles/latest/v1"),
+    trackedFetch("token_profiles_latest", "https://api.dexscreener.com/token-profiles/latest/v1", true),
     trackedFetch("boosts_latest", "https://api.dexscreener.com/token-boosts/latest/v1", true),
     trackedFetch("boosts_top", "https://api.dexscreener.com/token-boosts/top/v1", true)
   ]);
@@ -64,27 +104,41 @@ async function loadCandidates() {
   const latest = (Array.isArray(latestRaw) ? latestRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
   const top = (Array.isArray(topRaw) ? topRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
   const sourceMap = new Map();
+  const addSource = (address, source) => {
+    if (!sourceMap.has(address)) sourceMap.set(address, new Set());
+    sourceMap.get(address).add(source);
+  };
   for (const [source, list] of [["profile", profiles], ["boost_latest", latest], ["boost_top", top]]) {
-    for (const item of list) {
-      if (!sourceMap.has(item.tokenAddress)) sourceMap.set(item.tokenAddress, new Set());
-      sourceMap.get(item.tokenAddress).add(source);
-    }
+    for (const item of list) addSource(item.tokenAddress, source);
   }
-  const addresses = [...sourceMap.keys()].slice(0, 180);
+  for (const address of geckoByAddress.keys()) addSource(address, "geckoterminal_new_pool");
+
+  // Prioritize tokens from newly created pools, then fill remaining capacity with DexScreener discovery.
+  const geckoAddresses = [...geckoByAddress.keys()];
+  const otherAddresses = [...sourceMap.keys()].filter(address => !geckoByAddress.has(address));
+  const addresses = [...geckoAddresses, ...otherAddresses].slice(0, MAX_ADDRESSES);
   const pairBatches = await Promise.all(Array.from({ length: Math.ceil(addresses.length / 30) }, (_, i) =>
-    trackedFetch("pair_batch_" + (i + 1), "https://api.dexscreener.com/tokens/v1/solana/" + addresses.slice(i * 30, (i + 1) * 30).join(","), true)
+    trackedFetch("dexscreener_pairs_batch_" + (i + 1),
+      "https://api.dexscreener.com/tokens/v1/solana/" + addresses.slice(i * 30, (i + 1) * 30).join(","), true)
   ));
-  const pairs = pairBatches.flat().filter(Boolean);
+  const pairs = pairBatches.flatMap(result => Array.isArray(result) ? result : []);
   const now = Date.now();
   const best = new Map();
-  const counts = { profileTokens: profiles.length, latestBoostTokens: latest.length, topBoostTokens: top.length, uniqueAddresses: sourceMap.size, addressesRequested: addresses.length, pairsReceived: pairs.length, rejectedMissingFields: 0, rejectedTooOld: 0, rejectedFuture: 0, rejectedLowLiquidity: 0, eligiblePairs: 0, uniqueEligibleTokens: 0 };
+  const counts = {
+    geckoPoolsReceived: geckoPools.length, geckoNewPoolsEligible: geckoByAddress.size,
+    profileTokens: profiles.length, latestBoostTokens: latest.length, topBoostTokens: top.length,
+    uniqueAddresses: sourceMap.size, addressesRequested: addresses.length, pairsReceived: pairs.length,
+    rejectedMissingFields: 0, rejectedTooOld: 0, rejectedFuture: 0, rejectedLowLiquidity: 0,
+    eligiblePairs: 0, uniqueEligibleTokens: 0, fallbackGeckoTokens: 0
+  };
+
   for (const pair of pairs) {
     if (!pair?.baseToken?.address || !pair?.pairAddress || !pair?.pairCreatedAt) { counts.rejectedMissingFields++; continue; }
     const ageMin = (now - n(pair.pairCreatedAt)) / 60000;
     const liquidity = n(pair.liquidity?.usd);
     if (ageMin < 0) { counts.rejectedFuture++; continue; }
-    if (ageMin > 30) { counts.rejectedTooOld++; continue; }
-    if (liquidity < 20000) { counts.rejectedLowLiquidity++; continue; }
+    if (ageMin > MAX_AGE_MIN) { counts.rejectedTooOld++; continue; }
+    if (liquidity < MIN_LIQUIDITY_USD) { counts.rejectedLowLiquidity++; continue; }
     counts.eligiblePairs++;
     const mint = pair.baseToken.address, volume = pair.volume || {}, txns = pair.txns || {}, changes = pair.priceChange || {}, info = pair.info || {};
     const buys5 = n(txns.m5?.buys), sells5 = n(txns.m5?.sells);
@@ -101,19 +155,46 @@ async function loadCandidates() {
       priceUsd: n(pair.priceUsd), priceNative: pair.priceNative || null, marketCapUsd: n(pair.marketCap), fdvUsd: n(pair.fdv),
       change5m: n(changes.m5), change1h: n(changes.h1), change6h: n(changes.h6), change24h: n(changes.h24),
       volume5m: n(volume.m5), volume1h: n(volume.h1), volume6h: n(volume.h6), volume24h: n(volume.h24),
-      liquidityUsd: liquidity,
-      buys5m: buys5, sells5m, txns5m: buys5 + sells5,
+      liquidityUsd: liquidity, buys5m: buys5, sells5m, txns5m: buys5 + sells5,
       buys1h: n(txns.h1?.buys), sells1h: n(txns.h1?.sells), txns1h: n(txns.h1?.buys) + n(txns.h1?.sells),
       buys6h: n(txns.h6?.buys), sells6h: n(txns.h6?.sells), txns6h: n(txns.h6?.buys) + n(txns.h6?.sells),
       buys24h: n(txns.h24?.buys), sells24h: n(txns.h24?.sells), txns24h: n(txns.h24?.buys) + n(txns.h24?.sells),
       buySellRatio: Number(((buys5 + 1) / (sells5 + 1)).toFixed(2)),
       score: scorePair(pair, ageMin, liquidity, n(volume.m5), buys5, sells5),
       riskStatus: "UNVERIFIED", smartMoney: "NOT VERIFIED", holderCount: null,
-      reasons: ["Live DEX market activity", buys5 > sells5 ? "More buys than sells in the last 5 minutes" : "Buy pressure is not confirmed", "Security and wallet attribution are not audited by this feed"]
+      reasons: ["Discovered from live pool/token feeds", buys5 > sells5 ? "More buys than sells in the last 5 minutes" : "Buy pressure is not confirmed", "Security and wallet attribution are not audited by this feed"]
     };
     const old = best.get(mint);
     if (!old || candidate.liquidityUsd > old.liquidityUsd) best.set(mint, candidate);
   }
+
+  // If DexScreener has not indexed a freshly-created pool yet, preserve its GeckoTerminal data.
+  for (const [mint, g] of geckoByAddress) {
+    if (best.has(mint)) continue;
+    const tx = g.txns || {};
+    const buys5 = n(tx.m5?.buys), sells5 = n(tx.m5?.sells);
+    const pairLike = { priceChange: { m5: g.change5m } };
+    const score = scorePair(pairLike, g.ageMin, g.liquidityUsd, g.volume5m, buys5, sells5);
+    best.set(mint, {
+      symbol: "NEW", name: g.name.split(" / ")[0] || "New Solana token", mint,
+      pairAddress: g.pairAddress, dexId: g.dexId, chainId: "solana",
+      url: "https://www.geckoterminal.com/solana/pools/" + g.pairAddress,
+      imageUrl: null, websites: [], socials: [], sources: ["geckoterminal_new_pool"],
+      ageMin: Math.round(g.ageMin * 10) / 10, pairCreatedAt: g.poolCreatedAt,
+      priceUsd: 0, priceNative: null, marketCapUsd: 0, fdvUsd: 0,
+      change5m: g.change5m, change1h: g.change1h, change6h: g.change6h, change24h: g.change24h,
+      volume5m: g.volume5m, volume1h: g.volume1h, volume6h: g.volume6h, volume24h: g.volume24h,
+      liquidityUsd: g.liquidityUsd, buys5m: buys5, sells5m, txns5m: buys5 + sells5,
+      buys1h: n(tx.h1?.buys), sells1h: n(tx.h1?.sells), txns1h: n(tx.h1?.buys) + n(tx.h1?.sells),
+      buys6h: n(tx.h6?.buys), sells6h: n(tx.h6?.sells), txns6h: n(tx.h6?.buys) + n(tx.h6?.sells),
+      buys24h: n(tx.h24?.buys), sells24h: n(tx.h24?.sells), txns24h: n(tx.h24?.buys) + n(tx.h24?.sells),
+      buySellRatio: Number(((buys5 + 1) / (sells5 + 1)).toFixed(2)), score,
+      riskStatus: "UNVERIFIED", smartMoney: "NOT VERIFIED", holderCount: null,
+      reasons: ["Fresh pool discovered by GeckoTerminal", "DexScreener pair metadata not indexed yet; price fields may be incomplete", "Security and sellability not verified"]
+    });
+    counts.fallbackGeckoTokens++;
+  }
+
   const tokens = [...best.values()].sort((a, b) => b.score - a.score);
   counts.uniqueEligibleTokens = tokens.length;
   telemetry.lastDurationMs = Date.now() - runStart;
@@ -122,13 +203,13 @@ async function loadCandidates() {
   return tokens;
 }
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "SOLRunner", dataProvider: "DexScreener", cached: Boolean(cache.payload), lastUpdated: cache.at || null }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "SOLRunner", dataProvider: "GeckoTerminal + DexScreener", cached: Boolean(cache.payload), lastUpdated: cache.at || null }));
 app.get("/api/tokens", async (_req, res) => {
   res.set("Cache-Control", "no-store");
   if (cache.payload && Date.now() - cache.at < CACHE_MS) return res.json({ ...cache.payload, cached: true });
   try {
     const tokens = await loadCandidates();
-    cache = { at: Date.now(), payload: { ok: true, source: "DexScreener public API", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", maxAgeMinutes: 30, minLiquidityUsd: 20000 }, tokens } };
+    cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new pools + DexScreener public API", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", maxAgeMinutes: MAX_AGE_MIN, minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
     lastError = null;
     return res.json({ ...cache.payload, cached: false });
   } catch (error) {
