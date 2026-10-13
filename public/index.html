@@ -8,7 +8,7 @@
 </style></head>
 <body><main class="app">
 <header class="top"><div class="brand"><div class="logo">S</div><div><div class="eyebrow">SOLANA MAINNET</div><h1>SOLRunner Radar</h1></div></div><div class="status" id="status">CONNECTING</div></header>
-<p class="sub">HYBRID DISCOVERY · LIVE DEX ACTIVITY · MANUAL REVIEW</p>
+<p class="sub">MULTI-DEX DISCOVERY · ORGANIC MOMENTUM · MANUAL REVIEW</p>
 <section class="stats"><div class="stat"><label>Eligible tokens</label><strong id="eligible">—</strong><small class="muted" id="dataNote">Loading live feed</small></div><div class="stat"><label>High scores</label><strong id="high">—</strong><small class="muted">Score ≥ 85</small></div><div class="stat"><label>Min. liquidity</label><strong>$20k</strong><small class="muted">Filter active</small></div></section>
 <div class="head"><h2>Early runner candidates</h2><span class="pill" id="count">0 tokens</span></div>
 <div class="controls"><select id="sortBy" class="control" aria-label="Sort order"><option value="score">Highest score</option><option value="volume">5m volume</option><option value="liquidity">Liquidity</option><option value="age">Newest</option></select></div>
@@ -16,7 +16,7 @@
 <section class="list" id="tokens"><div class="empty">Loading live Solana market data…</div></section>
 <section class="panel"><h3>Module telemetry</h3><p class="muted">API calls, latency, errors and pipeline filters. Counters reset when the service restarts.</p><section class="stats"><div class="stat"><label>Pairs received</label><strong id="telPairs">—</strong></div><div class="stat"><label>Unique tokens</label><strong id="telTokens">—</strong></div><div class="stat"><label>Refresh duration</label><strong id="telDuration">—</strong></div></section><div id="telemetryModules" class="telemetry-grid" style="margin-top:10px"><div class="empty">Waiting for telemetry…</div></div><p id="pipeline" class="muted"></p></section>
 <section class="panel"><h3>Risk & data coverage</h3><p class="muted">Market data and token metadata are displayed when the provider supplies them. Holder counts, mint/freeze authority, sellability and smart-money attribution are not verified by this feed. Score is heuristic, not a probability of profit.</p></section>
-<p class="foot" id="foot">Data source: DexScreener public API. Manual execution only. No wallet connection or trade execution.</p>
+<p class="foot" id="foot">Data source: GeckoTerminal + DexScreener public APIs. Organic momentum score is heuristic; unique wallet counts may be unavailable. Manual execution only. No wallet connection or trade execution.</p>
 </main>
 <script>
 "use strict";
@@ -31,7 +31,7 @@ function render(){
  if(activeFilter==="strong")rows=rows.filter(t=>Number(t.score)>=85);
  if(activeFilter==="risk")rows=rows.filter(t=>t.riskStatus==="UNVERIFIED");
  rows.sort((a,b)=>sort==="volume"?b.volume5m-a.volume5m:sort==="liquidity"?b.liquidityUsd-a.liquidityUsd:sort==="age"?a.ageMin-b.ageMin:b.score-a.score);
- $("#eligible").textContent=tokens.filter(t=>t.ageMin<=30&&t.liquidityUsd>=20000).length;
+ $("#eligible").textContent=tokens.filter(t=>t.liquidityUsd>=20000).length;
  $("#high").textContent=tokens.filter(t=>t.score>=85&&t.liquidityUsd>=20000).length;
  $("#count").textContent=rows.length+" tokens";
  const root=$("#tokens");
@@ -43,7 +43,7 @@ function render(){
   const details=[
    ["Price USD","$"+Number(t.priceUsd||0).toPrecision(9)],["Price native",t.priceNative||"—"],
    ["Price change 1h / 6h / 24h",Number(t.change1h||0).toFixed(2)+"% / "+Number(t.change6h||0).toFixed(2)+"% / "+Number(t.change24h||0).toFixed(2)+"%"],
-   ["Volume 1h / 6h",money(t.volume1h)+" / "+money(t.volume6h)],["Buys / sells 1h",(t.buys1h||0)+" / "+(t.sells1h||0)],
+   ["Volume 1h / 6h",money(t.volume1h)+" / "+money(t.volume6h)],["Unique buyers / sellers 5m",t.uniqueBuyers5m==null?"Not provided":t.uniqueBuyers5m+" / "+(t.uniqueSellers5m??"—")],\n   ["Unique buyers / sellers 1h",t.uniqueBuyers1h==null?"Not provided":t.uniqueBuyers1h+" / "+(t.uniqueSellers1h??"—")],\n   ["Buys / sells 1h",(t.buys1h||0)+" / "+(t.sells1h||0)],
    ["Buys / sells 24h",(t.buys24h||0)+" / "+(t.sells24h||0)],["Market cap",money(t.marketCapUsd)],
    ["Pair created",t.pairCreatedAt?new Date(t.pairCreatedAt).toLocaleString():"—"],["Mint address",t.mint],["Pair address",t.pairAddress],
    ["Discovery sources",(t.sources||[]).join(", ")||"market pair"],["Chain / DEX",(t.chainId||"solana")+" / "+(t.dexId||"unknown")]
@@ -60,7 +60,7 @@ async function refreshTelemetry(){
   $("#telDuration").textContent=t.refresh?.lastDurationMs==null?"—":t.refresh.lastDurationMs+" ms";
   const names=Object.keys(mods);
   $("#telemetryModules").innerHTML=names.length?names.map(name=>{const m=mods[name];return '<div class="telemetry-module"><strong>'+esc(name.replace(/_/g," "))+'</strong><small class="'+esc(m.lastStatus||"")+'">'+esc(String(m.lastStatus||"never").toUpperCase())+'</small><small>Calls '+m.calls+' · OK '+m.successes+' · errors '+m.failures+'</small><small>Last '+(m.lastMs??"—")+' ms · avg '+(m.avgMs??"—")+' ms</small>'+(m.lastError?'<small>'+esc(m.lastError)+'</small>':"")+'</div>'}).join(""):'<div class="empty">No API calls recorded yet.</div>';
-  $("#pipeline").textContent='Gecko pools '+(p.geckoPoolsReceived??0)+' · fresh/liquid pools '+(p.geckoNewPoolsEligible??0)+' · Gecko fallback tokens '+(p.fallbackGeckoTokens??0)+' · profiles '+(p.profileTokens??0)+' · latest boosts '+(p.latestBoostTokens??0)+' · top boosts '+(p.topBoostTokens??0)+' · addresses '+(p.uniqueAddresses??0)+' · pairs '+(p.pairsReceived??0)+' · rejected: liquidity '+(p.rejectedLowLiquidity??0)+', missing fields '+(p.rejectedMissingFields??0)+' · refreshes '+(t.refresh?.runs??0)+' · failures '+(t.refresh?.failures??0)+' · uptime '+(t.uptimeSeconds??0)+'s';
+  $("#pipeline").textContent='Gecko pools '+(p.geckoPoolsReceived??0)+' · liquid candidates '+(p.geckoNewPoolsEligible??0)+' · Gecko fallback tokens '+(p.fallbackGeckoTokens??0)+' · profiles '+(p.profileTokens??0)+' · latest boosts '+(p.latestBoostTokens??0)+' · top boosts '+(p.topBoostTokens??0)+' · addresses '+(p.uniqueAddresses??0)+' · pairs '+(p.pairsReceived??0)+' · rejected: liquidity '+(p.rejectedLowLiquidity??0)+', missing fields '+(p.rejectedMissingFields??0)+' · refreshes '+(t.refresh?.runs??0)+' · failures '+(t.refresh?.failures??0)+' · uptime '+(t.uptimeSeconds??0)+'s';
  }catch(_e){}
 }
 async function refresh(){
@@ -71,7 +71,7 @@ async function refresh(){
   const updated=new Date(body.updatedAt||Date.now());
   $("#status").textContent=body.stale?"STALE DATA":"LIVE · SOL";
   $("#dataNote").textContent=(body.cached?"Cached · ":"Updated · ")+updated.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"});
-  $("#foot").textContent="Source: DexScreener public API · Last successful update: "+updated.toLocaleString()+". Security checks are not included. Manual review only.";
+  $("#foot").textContent="Source: GeckoTerminal discovery + DexScreener market data · Last successful update: "+updated.toLocaleString()+". Security checks are not included. Manual review only.";
   render();refreshTelemetry();
  }catch(err){$("#status").textContent="FEED ERROR";$("#dataNote").textContent="Live data unavailable";$("#tokens").innerHTML='<div class="empty">Could not load live data. '+esc(err.message)+' Check service logs.</div>'}
 }
