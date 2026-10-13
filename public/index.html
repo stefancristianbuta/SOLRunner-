@@ -11,7 +11,7 @@
 <p class="sub">HYBRID DISCOVERY · LIVE DEX ACTIVITY · MANUAL REVIEW</p>
 <section class="stats"><div class="stat"><label>Eligible tokens</label><strong id="eligible">—</strong><small class="muted" id="dataNote">Loading live feed</small></div><div class="stat"><label>High scores</label><strong id="high">—</strong><small class="muted">Score ≥ 85</small></div><div class="stat"><label>Min. liquidity</label><strong>$20k</strong><small class="muted">Filter active</small></div></section>
 <div class="head"><h2>Early runner candidates</h2><span class="pill" id="count">0 tokens</span></div>
-<div class="controls"><select id="ageFilter" class="control" aria-label="Maximum age"><option value="30">Max age: 30m</option><option value="10">Max age: 10m</option><option value="5">Max age: 5m</option></select><select id="sortBy" class="control" aria-label="Sort order"><option value="score">Highest score</option><option value="volume">5m volume</option><option value="liquidity">Liquidity</option><option value="age">Newest</option></select></div>
+<div class="controls"><select id="sortBy" class="control" aria-label="Sort order"><option value="score">Highest score</option><option value="volume">5m volume</option><option value="liquidity">Liquidity</option><option value="age">Newest</option></select></div>
 <div class="chips"><button class="active" data-filter="all">All candidates</button><button data-filter="strong">Score ≥ 85</button><button data-filter="risk">Unverified risk</button></div>
 <section class="list" id="tokens"><div class="empty">Loading live Solana market data…</div></section>
 <section class="panel"><h3>Module telemetry</h3><p class="muted">API calls, latency, errors and pipeline filters. Counters reset when the service restarts.</p><section class="stats"><div class="stat"><label>Pairs received</label><strong id="telPairs">—</strong></div><div class="stat"><label>Unique tokens</label><strong id="telTokens">—</strong></div><div class="stat"><label>Refresh duration</label><strong id="telDuration">—</strong></div></section><div id="telemetryModules" class="telemetry-grid" style="margin-top:10px"><div class="empty">Waiting for telemetry…</div></div><p id="pipeline" class="muted"></p></section>
@@ -26,13 +26,13 @@ const money=v=>{v=Number(v)||0;return v>=1e9?"$"+(v/1e9).toFixed(2)+"B":v>=1e6?"
 const short=s=>{s=String(s||"");return s.length>18?s.slice(0,8)+"…"+s.slice(-6):s};
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function render(){
- const maxAge=Number($("#ageFilter").value),sort=$("#sortBy").value;
- let rows=tokens.filter(t=>Number(t.ageMin)<=maxAge&&Number(t.liquidityUsd)>=20000);
+ const sort=$("#sortBy").value;
+ let rows=tokens.filter(t=>Number(t.liquidityUsd)>=20000);
  if(activeFilter==="strong")rows=rows.filter(t=>Number(t.score)>=85);
  if(activeFilter==="risk")rows=rows.filter(t=>t.riskStatus==="UNVERIFIED");
  rows.sort((a,b)=>sort==="volume"?b.volume5m-a.volume5m:sort==="liquidity"?b.liquidityUsd-a.liquidityUsd:sort==="age"?a.ageMin-b.ageMin:b.score-a.score);
  $("#eligible").textContent=tokens.filter(t=>t.ageMin<=30&&t.liquidityUsd>=20000).length;
- $("#high").textContent=tokens.filter(t=>t.score>=85&&t.ageMin<=maxAge&&t.liquidityUsd>=20000).length;
+ $("#high").textContent=tokens.filter(t=>t.score>=85&&t.liquidityUsd>=20000).length;
  $("#count").textContent=rows.length+" tokens";
  const root=$("#tokens");
  if(!rows.length){root.innerHTML='<div class="empty">No live tokens match these filters right now.</div>';return}
@@ -60,7 +60,7 @@ async function refreshTelemetry(){
   $("#telDuration").textContent=t.refresh?.lastDurationMs==null?"—":t.refresh.lastDurationMs+" ms";
   const names=Object.keys(mods);
   $("#telemetryModules").innerHTML=names.length?names.map(name=>{const m=mods[name];return '<div class="telemetry-module"><strong>'+esc(name.replace(/_/g," "))+'</strong><small class="'+esc(m.lastStatus||"")+'">'+esc(String(m.lastStatus||"never").toUpperCase())+'</small><small>Calls '+m.calls+' · OK '+m.successes+' · errors '+m.failures+'</small><small>Last '+(m.lastMs??"—")+' ms · avg '+(m.avgMs??"—")+' ms</small>'+(m.lastError?'<small>'+esc(m.lastError)+'</small>':"")+'</div>'}).join(""):'<div class="empty">No API calls recorded yet.</div>';
-  $("#pipeline").textContent='Gecko pools '+(p.geckoPoolsReceived??0)+' · fresh/liquid pools '+(p.geckoNewPoolsEligible??0)+' · Gecko fallback tokens '+(p.fallbackGeckoTokens??0)+' · profiles '+(p.profileTokens??0)+' · latest boosts '+(p.latestBoostTokens??0)+' · top boosts '+(p.topBoostTokens??0)+' · addresses '+(p.uniqueAddresses??0)+' · pairs '+(p.pairsReceived??0)+' · rejected: age '+(p.rejectedTooOld??0)+', liquidity '+(p.rejectedLowLiquidity??0)+', missing fields '+(p.rejectedMissingFields??0)+' · refreshes '+(t.refresh?.runs??0)+' · failures '+(t.refresh?.failures??0)+' · uptime '+(t.uptimeSeconds??0)+'s';
+  $("#pipeline").textContent='Gecko pools '+(p.geckoPoolsReceived??0)+' · fresh/liquid pools '+(p.geckoNewPoolsEligible??0)+' · Gecko fallback tokens '+(p.fallbackGeckoTokens??0)+' · profiles '+(p.profileTokens??0)+' · latest boosts '+(p.latestBoostTokens??0)+' · top boosts '+(p.topBoostTokens??0)+' · addresses '+(p.uniqueAddresses??0)+' · pairs '+(p.pairsReceived??0)+' · rejected: liquidity '+(p.rejectedLowLiquidity??0)+', missing fields '+(p.rejectedMissingFields??0)+' · refreshes '+(t.refresh?.runs??0)+' · failures '+(t.refresh?.failures??0)+' · uptime '+(t.uptimeSeconds??0)+'s';
  }catch(_e){}
 }
 async function refresh(){
@@ -76,6 +76,6 @@ async function refresh(){
  }catch(err){$("#status").textContent="FEED ERROR";$("#dataNote").textContent="Live data unavailable";$("#tokens").innerHTML='<div class="empty">Could not load live data. '+esc(err.message)+' Check service logs.</div>'}
 }
 document.querySelectorAll(".chips button").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".chips button").forEach(x=>x.classList.remove("active"));b.classList.add("active");activeFilter=b.dataset.filter;render()}));
-$("#ageFilter").addEventListener("change",render);$("#sortBy").addEventListener("change",render);
+$("#sortBy").addEventListener("change",render);
 refresh();refreshTelemetry();setInterval(refresh,15000);setInterval(refreshTelemetry,15000);
 </script></body></html>
