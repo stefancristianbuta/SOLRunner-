@@ -113,6 +113,9 @@ async function loadCandidates() {
     trackedFetch("dex_search_sol_usdt", "https://api.dexscreener.com/latest/dex/search?q=SOL/USDT", true),
     trackedFetch("dex_search_sol", "https://api.dexscreener.com/latest/dex/search?q=SOL", true)
   ]);
+  if (geckoResults.every(result => result === null) && [profilesRaw, latestRaw, topRaw, searchSolUsdc, searchSolUsdt, searchSol].every(result => result === null)) {
+    throw new Error("All discovery providers are unavailable");
+  }
   const profiles = (Array.isArray(profilesRaw) ? profilesRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
   const latest = (Array.isArray(latestRaw) ? latestRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
   const top = (Array.isArray(topRaw) ? topRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
