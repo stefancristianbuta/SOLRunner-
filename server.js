@@ -47,6 +47,8 @@ async function trackedFetch(moduleName, url, optional = false) {
 }
 
 const { scorePair } = require("./lib/score");
+const { createPerformanceTracker } = require("./lib/performance");
+const performanceTracker = createPerformanceTracker();
 
 async function loadCandidates() {
   const runStart = Date.now();
@@ -226,6 +228,7 @@ async function loadCandidates() {
 
   const tokens = [...best.values()].sort((a, b) => b.score - a.score);
   counts.uniqueEligibleTokens = tokens.length;
+  performanceTracker.observe(tokens);
   counts.tokensWithLogo = tokens.filter(token => Boolean(token.imageUrl)).length;
   counts.tokensWithoutLogo = tokens.length - counts.tokensWithLogo;
   counts.logoCoveragePct = tokens.length ? Math.round((counts.tokensWithLogo / tokens.length) * 100) : 0;
@@ -259,7 +262,7 @@ app.get("/api/telemetry", (_req, res) => res.json({
   ok: true, generatedAt: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()),
   cache: { ageSeconds: cache.at ? Math.round((Date.now() - cache.at) / 1000) : null, hasSnapshot: Boolean(cache.payload), tokenCount: cache.payload?.count || 0 },
   refresh: { runs: telemetry.runs, failures: telemetry.failures, lastRunAt: telemetry.lastRunAt, lastDurationMs: telemetry.lastDurationMs, lastError },
-  modules: telemetry.modules, pipeline: telemetry.lastPipeline
+  modules: telemetry.modules, pipeline: telemetry.lastPipeline, performance: performanceTracker.snapshot()
 }));
 app.get("/api/status", (_req, res) => res.json({ ok: true, lastUpdated: cache.at ? new Date(cache.at).toISOString() : null, lastError, hasSnapshot: Boolean(cache.payload) }));
 app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
