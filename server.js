@@ -241,6 +241,9 @@ async function loadCandidates() {
 
   const tokens = [...best.values()].sort((a, b) => b.score - a.score);
   counts.uniqueEligibleTokens = tokens.length;
+  counts.tokensWithLogo = tokens.filter(token => Boolean(token.imageUrl)).length;
+  counts.tokensWithoutLogo = tokens.length - counts.tokensWithLogo;
+  counts.logoCoveragePct = tokens.length ? Math.round((counts.tokensWithLogo / tokens.length) * 100) : 0;
   telemetry.lastDurationMs = Date.now() - runStart;
   telemetry.runs++;
   telemetry.lastPipeline = counts;

@@ -3,11 +3,10 @@
 Mobile-first Solana early-runner discovery dashboard.
 
 ## Current implementation
-- Live candidate discovery via the public DexScreener token profile and token-pair APIs.
-- Solana-only filtering.
-- Default maximum pool age: 30 minutes.
-- Default minimum reported pool liquidity: $20,000.
-- Heuristic score sorted descending by default.
+- Live candidate discovery across GeckoTerminal new pools, 5m/1h trending pools and high-activity pools, enriched with public DexScreener profile, boost, search and pair APIs.
+- Solana-only filtering, with no maximum pool-age cutoff; older pools can qualify when current activity and liquidity support them.
+- Minimum reported pool liquidity: $20,000.
+- Heuristic momentum score sorted descending by default; see the app's Telemetry view for provider health, pipeline counts and token-logo coverage.
 - Manual review only. No wallet connection, private keys, or trade execution.
 - Server-side proxy and short cache to avoid exposing provider calls in the browser.
 
