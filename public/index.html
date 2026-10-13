@@ -64,8 +64,10 @@ async function refreshTelemetry(){
  }catch(_e){}
 }
 async function refresh(){
+ const controller=new AbortController();
+ const timeout=setTimeout(()=>controller.abort(),25000);
  try{
-  const res=await fetch("/api/tokens",{cache:"no-store"}),body=await res.json();
+  const res=await fetch("/api/tokens",{cache:"no-store",signal:controller.signal}),body=await res.json();
   if(!res.ok||!body.ok)throw new Error(body.detail||body.error||"Feed unavailable");
   tokens=Array.isArray(body.tokens)?body.tokens:[];
   const updated=new Date(body.updatedAt||Date.now());
@@ -73,7 +75,11 @@ async function refresh(){
   $("#dataNote").textContent=(body.cached?"Cached · ":"Updated · ")+updated.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"});
   $("#foot").textContent="Source: GeckoTerminal discovery + DexScreener market data · Last successful update: "+updated.toLocaleString()+". Security checks are not included. Manual review only.";
   render();refreshTelemetry();
- }catch(err){$("#status").textContent="FEED ERROR";$("#dataNote").textContent="Live data unavailable";$("#tokens").innerHTML='<div class="empty">Could not load live data. '+esc(err.message)+' Check service logs.</div>'}
+ }catch(err){
+  const reason=err.name==="AbortError"?"API timeout after 25 seconds":(err.message||"Network request failed");
+  $("#status").textContent="FEED ERROR";$("#dataNote").textContent=reason;
+  $("#tokens").innerHTML='<div class="empty">Feed did not respond. '+esc(reason)+'. Check /api/health and Northflank logs.</div>';
+ }finally{clearTimeout(timeout)}
 }
 document.querySelectorAll(".chips button").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".chips button").forEach(x=>x.classList.remove("active"));b.classList.add("active");activeFilter=b.dataset.filter;render()}));
 $("#sortBy").addEventListener("change",render);
