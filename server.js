@@ -6,6 +6,7 @@ const CACHE_MS = 30_000;
 const MIN_LIQUIDITY_USD = 20_000;
 const MAX_ADDRESSES = 240;
 let cache = { at: 0, payload: null };
+let refreshInFlight = null;
 let lastError = null;
 const telemetry = { lastRunAt: null, lastDurationMs: null, runs: 0, failures: 0, modules: {}, lastPipeline: {} };
 
@@ -45,26 +46,7 @@ async function trackedFetch(moduleName, url, optional = false) {
   }
 }
 
-function scorePair(pair, ageMin, liquidity, volume, buys, sells, signal = {}) {
-  const total = buys + sells;
-  const buyShare = total ? buys / total : 0;
-  const volumeLiquidity = volume / Math.max(liquidity, 1);
-  const activity = clamp(Math.log10(total + 1) / 2.4, 0, 1);
-  const liquidityQuality = clamp(Math.log10(liquidity / MIN_LIQUIDITY_USD + 1) / 1.2, 0, 1);
-  const momentum5m = clamp((n(pair.priceChange?.m5) + 5) / 25, 0, 1);
-  const momentum1h = clamp((n(pair.priceChange?.h1) + 5) / 35, 0, 1);
-  const buyPressure = clamp((buyShare - 0.35) / 0.5, 0, 1);
-  const volPulse = clamp(volumeLiquidity / 1.5, 0, 1);
-  const buyers = n(signal.buyers), sellers = n(signal.sellers);
-  const uniqueBuyerSignal = buyers + sellers > 0 ? clamp((buyers / Math.max(buyers + sellers, 1) - 0.35) / 0.5, 0, 1) : null;
-  // Organic-momentum heuristic: favor sustained activity, rising volume and broad buyer participation.
-  // Missing unique-wallet data is neutral, not proof of organic demand.
-  const organic = uniqueBuyerSignal === null ? 0.5 : uniqueBuyerSignal;
-  const score = buyPressure * 20 + (volPulse * 0.55 + activity * 0.45) * 20 +
-    liquidityQuality * 15 + (momentum5m * 0.65 + momentum1h * 0.35) * 20 +
-    organic * 15 + clamp(total / 30, 0, 1) * 10;
-  return Math.round(clamp(score, 0, 100));
-}
+const { scorePair } = require("./lib/score");
 
 async function loadCandidates() {
   const runStart = Date.now();
@@ -258,10 +240,15 @@ app.get("/api/tokens", async (_req, res) => {
   res.set("Cache-Control", "no-store");
   if (cache.payload && Date.now() - cache.at < CACHE_MS) return res.json({ ...cache.payload, cached: true });
   try {
-    const tokens = await loadCandidates();
-    cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new/trending/active pools + DexScreener search and market APIs", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
-    lastError = null;
-    return res.json({ ...cache.payload, cached: false });
+    if (!refreshInFlight) {
+      refreshInFlight = loadCandidates().then(tokens => {
+        cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new/trending/active pools + DexScreener search and market APIs", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
+        lastError = null;
+        return cache.payload;
+      }).finally(() => { refreshInFlight = null; });
+    }
+    const payload = await refreshInFlight;
+    return res.json({ ...payload, cached: true });
   } catch (error) {
     lastError = String(error.message || error); telemetry.failures++;
     if (cache.payload) return res.status(200).json({ ...cache.payload, stale: true, warning: "Live refresh failed; showing last successful snapshot." });
