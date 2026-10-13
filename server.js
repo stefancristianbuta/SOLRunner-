@@ -3,7 +3,6 @@ const path = require("path");
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_MS = 30_000;
-const MAX_AGE_MIN = 30;
 const MIN_LIQUIDITY_USD = 20_000;
 const MAX_ADDRESSES = 240;
 let cache = { at: 0, payload: null };
@@ -53,7 +52,7 @@ function scorePair(pair, ageMin, liquidity, volume, buys, sells) {
   const activity = clamp(Math.log10(total + 1) / 2.4, 0, 1);
   const liquidityQuality = clamp(Math.log10(liquidity / MIN_LIQUIDITY_USD + 1) / 1.2, 0, 1);
   const momentum = clamp((n(pair.priceChange?.m5) + 10) / 40, 0, 1);
-  const freshness = clamp(1 - ageMin / MAX_AGE_MIN, 0, 1);
+  const freshness = 1; // Age is metadata only; do not penalize older runners.
   const buyPressure = clamp((buyShare - 0.35) / 0.5, 0, 1);
   const volPulse = clamp(volumeLiquidity / 2, 0, 1);
   return Math.round(buyPressure * 25 + (volPulse * 0.6 + activity * 0.4) * 25 + liquidityQuality * 20 + freshness * 10 + momentum * 10 + (total >= 20 ? 10 : total / 2));
@@ -81,7 +80,7 @@ async function loadCandidates() {
     const createdAt = Date.parse(attrs.pool_created_at || "");
     const ageMin = Number.isFinite(createdAt) ? (Date.now() - createdAt) / 60000 : null;
     const reserveUsd = n(attrs.reserve_in_usd);
-    if (ageMin !== null && ageMin >= 0 && ageMin <= MAX_AGE_MIN && reserveUsd >= MIN_LIQUIDITY_USD) {
+    if (ageMin !== null && ageMin >= 0 && reserveUsd >= MIN_LIQUIDITY_USD) {
       const old = geckoByAddress.get(mint);
       if (!old || reserveUsd > old.liquidityUsd) geckoByAddress.set(mint, {
         mint, pairAddress: attrs.address || String(pool.id || "").replace(/^solana_/, ""),
@@ -128,7 +127,7 @@ async function loadCandidates() {
     geckoPoolsReceived: geckoPools.length, geckoNewPoolsEligible: geckoByAddress.size,
     profileTokens: profiles.length, latestBoostTokens: latest.length, topBoostTokens: top.length,
     uniqueAddresses: sourceMap.size, addressesRequested: addresses.length, pairsReceived: pairs.length,
-    rejectedMissingFields: 0, rejectedTooOld: 0, rejectedFuture: 0, rejectedLowLiquidity: 0,
+    rejectedMissingFields: 0, rejectedFuture: 0, rejectedLowLiquidity: 0,
     eligiblePairs: 0, uniqueEligibleTokens: 0, fallbackGeckoTokens: 0
   };
 
@@ -137,7 +136,7 @@ async function loadCandidates() {
     const ageMin = (now - n(pair.pairCreatedAt)) / 60000;
     const liquidity = n(pair.liquidity?.usd);
     if (ageMin < 0) { counts.rejectedFuture++; continue; }
-    if (ageMin > MAX_AGE_MIN) { counts.rejectedTooOld++; continue; }
+    
     if (liquidity < MIN_LIQUIDITY_USD) { counts.rejectedLowLiquidity++; continue; }
     counts.eligiblePairs++;
     const mint = pair.baseToken.address, volume = pair.volume || {}, txns = pair.txns || {}, changes = pair.priceChange || {}, info = pair.info || {};
@@ -209,7 +208,7 @@ app.get("/api/tokens", async (_req, res) => {
   if (cache.payload && Date.now() - cache.at < CACHE_MS) return res.json({ ...cache.payload, cached: true });
   try {
     const tokens = await loadCandidates();
-    cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new pools + DexScreener public API", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", maxAgeMinutes: MAX_AGE_MIN, minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
+    cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new pools + DexScreener public API", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
     lastError = null;
     return res.json({ ...cache.payload, cached: false });
   } catch (error) {
