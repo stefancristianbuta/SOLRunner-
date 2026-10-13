@@ -43,7 +43,9 @@ function render(){
   const details=[
    ["Price USD","$"+Number(t.priceUsd||0).toPrecision(9)],["Price native",t.priceNative||"—"],
    ["Price change 1h / 6h / 24h",Number(t.change1h||0).toFixed(2)+"% / "+Number(t.change6h||0).toFixed(2)+"% / "+Number(t.change24h||0).toFixed(2)+"%"],
-   ["Volume 1h / 6h",money(t.volume1h)+" / "+money(t.volume6h)],["Unique buyers / sellers 5m",t.uniqueBuyers5m==null?"Not provided":t.uniqueBuyers5m+" / "+(t.uniqueSellers5m??"—")],\n   ["Unique buyers / sellers 1h",t.uniqueBuyers1h==null?"Not provided":t.uniqueBuyers1h+" / "+(t.uniqueSellers1h??"—")],\n   ["Buys / sells 1h",(t.buys1h||0)+" / "+(t.sells1h||0)],
+   ["Volume 1h / 6h",money(t.volume1h)+" / "+money(t.volume6h)],["Unique buyers / sellers 5m",t.uniqueBuyers5m==null?"Not provided":t.uniqueBuyers5m+" / "+(t.uniqueSellers5m??"—")],
+   ["Unique buyers / sellers 1h",t.uniqueBuyers1h==null?"Not provided":t.uniqueBuyers1h+" / "+(t.uniqueSellers1h??"—")],
+   ["Buys / sells 1h",(t.buys1h||0)+" / "+(t.sells1h||0)],
    ["Buys / sells 24h",(t.buys24h||0)+" / "+(t.sells24h||0)],["Market cap",money(t.marketCapUsd)],
    ["Pair created",t.pairCreatedAt?new Date(t.pairCreatedAt).toLocaleString():"—"],["Mint address",t.mint],["Pair address",t.pairAddress],
    ["Discovery sources",(t.sources||[]).join(", ")||"market pair"],["Chain / DEX",(t.chainId||"solana")+" / "+(t.dexId||"unknown")]
