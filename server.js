@@ -176,7 +176,7 @@ async function loadCandidates() {
       name: String(pair.baseToken.name || pair.baseToken.symbol || "Unknown token").slice(0, 80),
       mint, pairAddress: pair.pairAddress, dexId: pair.dexId || "unknown", chainId: pair.chainId || "solana",
       url: pair.url || "https://dexscreener.com/solana/" + pair.pairAddress,
-      imageUrl: info.imageUrl || tokenMetadata.get(mint)?.icon || null, header: info.header || tokenMetadata.get(mint)?.header || null, openGraph: info.openGraph || null,
+      imageUrl: tokenMetadata.get(mint)?.icon || info.imageUrl || null, header: tokenMetadata.get(mint)?.header || info.header || null, openGraph: info.openGraph || null,
       websites: (Array.isArray(info.websites) ? info.websites : []).slice(0, 8),
       socials: (Array.isArray(info.socials) ? info.socials : []).slice(0, 10),
       sources: [...(sourceMap.get(mint) || [])],
