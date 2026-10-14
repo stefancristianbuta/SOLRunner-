@@ -2,7 +2,9 @@ const express = require("express");
 const path = require("path");
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const CACHE_MS = 15_000;
+const CACHE_MS = 60_000;
+const GECKO_MIN_INTERVAL_MS = 1_500;
+let lastGeckoRequestAt = 0;
 const MIN_LIQUIDITY_USD = 20_000;
 const MAX_ADDRESSES = 240;
 let cache = { at: 0, payload: null };
@@ -17,6 +19,12 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const addressFromGeckoId = id => String(id || "").startsWith("solana_") ? String(id).slice(7) : "";
 
 async function trackedFetch(moduleName, url, optional = false) {
+  // GeckoTerminal public API: spread requests out instead of firing a burst of four at once.
+  if (url.startsWith("https://api.geckoterminal.com/")) {
+    const waitMs = Math.max(0, lastGeckoRequestAt + GECKO_MIN_INTERVAL_MS - Date.now());
+    if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+    lastGeckoRequestAt = Date.now();
+  }
   const start = Date.now();
   const entry = telemetry.modules[moduleName] || { calls: 0, successes: 0, failures: 0, lastMs: null, avgMs: null, lastStatus: "never", lastError: null };
   entry.calls++;
