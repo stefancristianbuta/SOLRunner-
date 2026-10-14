@@ -106,6 +106,10 @@ async function loadCandidates() {
   const latest = (Array.isArray(latestRaw) ? latestRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
   const top = (Array.isArray(topRaw) ? topRaw : []).filter(x => x.chainId === "solana" && x.tokenAddress);
   const tokenMetadata = new Map();
+  // Seed logo metadata from GeckoTerminal first; DexScreener fills only missing logos.
+  for (const [mint, pool] of geckoByAddress) {
+    if (pool.imageUrl) tokenMetadata.set(mint, { icon: pool.imageUrl, header: null });
+  }
   for (const item of [...profiles, ...latest, ...top]) {
     if (!item?.tokenAddress) continue;
     const old = tokenMetadata.get(item.tokenAddress) || {};
