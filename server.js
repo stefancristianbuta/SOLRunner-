@@ -57,12 +57,12 @@ async function loadCandidates() {
   // Multi-signal discovery: new pools plus pools trending over 5m/1h and high-activity pools.
   // GeckoTerminal's public API is rate-limited, so keep discovery to four calls per refresh.
   const geckoResults = await Promise.all([
-    trackedFetch("geckoterminal_new_pools", "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1", true),
-    trackedFetch("geckoterminal_trending_5m", "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=5m", true),
-    trackedFetch("geckoterminal_trending_1h", "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=1h", true),
-    trackedFetch("geckoterminal_active_pools", "https://api.geckoterminal.com/api/v2/networks/solana/pools?sort=h24_tx_count_desc&page=1", true)
+    trackedFetch("geckoterminal_new_pools", "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1&include=base_token", true),
+    trackedFetch("geckoterminal_trending_5m", "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=5m&include=base_token", true),
+    trackedFetch("geckoterminal_trending_1h", "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=1h&include=base_token", true),
+    trackedFetch("geckoterminal_active_pools", "https://api.geckoterminal.com/api/v2/networks/solana/pools?sort=h24_tx_count_desc&page=1&include=base_token", true)
   ]);
-  const geckoPools = geckoResults.flatMap((result, index) => Array.isArray(result?.data) ? result.data.map(pool => ({ ...pool, __solrunnerSource: ["geckoterminal_new_pool", "geckoterminal_trending_5m", "geckoterminal_trending_1h", "geckoterminal_active_pool"][index] })) : []);
+  const geckoPools = geckoResults.flatMap((result, index) => Array.isArray(result?.data) ? result.data.map(pool => ({ ...pool, __included: Array.isArray(result.included) ? result.included : [], __solrunnerSource: ["geckoterminal_new_pool", "geckoterminal_trending_5m", "geckoterminal_trending_1h", "geckoterminal_active_pool"][index] })) : []);
   const geckoByAddress = new Map();
   for (const pool of geckoPools) {
     const attrs = pool.attributes || {};
@@ -70,6 +70,8 @@ async function loadCandidates() {
     const baseId = rel.base_token?.data?.id;
     const quoteId = rel.quote_token?.data?.id;
     const mint = addressFromGeckoId(baseId);
+    const includedBaseToken = (pool.__included || []).find(item => item?.id === baseId && item?.type === "token");
+    const geckoIcon = includedBaseToken?.attributes?.image_url || includedBaseToken?.attributes?.imageUrl || null;
     if (!mint) continue;
     const createdAt = Date.parse(attrs.pool_created_at || "");
     const ageMin = Number.isFinite(createdAt) ? (Date.now() - createdAt) / 60000 : null;
@@ -80,7 +82,7 @@ async function loadCandidates() {
       if (!old || reserveUsd > old.liquidityUsd) geckoByAddress.set(mint, {
         mint, pairAddress: attrs.address || String(pool.id || "").replace(/^solana_/, ""),
         ageMin, liquidityUsd: reserveUsd, name: attrs.name || "", dexId: rel.dex?.data?.id || "geckoterminal",
-        volume5m: n(attrs.volume_usd?.m5), volume1h: n(attrs.volume_usd?.h1),
+        imageUrl: geckoIcon, volume5m: n(attrs.volume_usd?.m5), volume1h: n(attrs.volume_usd?.h1),
         volume6h: n(attrs.volume_usd?.h6), volume24h: n(attrs.volume_usd?.h24),
         change5m: n(attrs.price_change_percentage?.m5), change1h: n(attrs.price_change_percentage?.h1),
         change6h: n(attrs.price_change_percentage?.h6), change24h: n(attrs.price_change_percentage?.h24),
@@ -107,7 +109,7 @@ async function loadCandidates() {
   for (const item of [...profiles, ...latest, ...top]) {
     if (!item?.tokenAddress) continue;
     const old = tokenMetadata.get(item.tokenAddress) || {};
-    tokenMetadata.set(item.tokenAddress, { icon: item.icon || old.icon || null, header: item.header || old.header || null });
+    tokenMetadata.set(item.tokenAddress, { icon: old.icon || item.icon || null, header: old.header || item.header || null });
   }
   const sourceMap = new Map();
   const addSource = (address, source) => {
@@ -174,7 +176,7 @@ async function loadCandidates() {
       name: String(pair.baseToken.name || pair.baseToken.symbol || "Unknown token").slice(0, 80),
       mint, pairAddress: pair.pairAddress, dexId: pair.dexId || "unknown", chainId: pair.chainId || "solana",
       url: pair.url || "https://dexscreener.com/solana/" + pair.pairAddress,
-      imageUrl: info.imageUrl || tokenMetadata.get(mint)?.icon || null, header: info.header || tokenMetadata.get(mint)?.header || null, openGraph: info.openGraph || null,
+      imageUrl: tokenMetadata.get(mint)?.icon || info.imageUrl || null, header: tokenMetadata.get(mint)?.header || info.header || null, openGraph: info.openGraph || null,
       websites: (Array.isArray(info.websites) ? info.websites : []).slice(0, 8),
       socials: (Array.isArray(info.socials) ? info.socials : []).slice(0, 10),
       sources: [...(sourceMap.get(mint) || [])],
