@@ -9,6 +9,10 @@ const MIN_LIQUIDITY_USD = 20_000;
 const MAX_ADDRESSES = 240;
 const SECURITY_CACHE_MS = 10 * 60_000;
 const SECURITY_SCAN_LIMIT = 16;
+const LOGO_SCAN_LIMIT = 4;
+const LOGO_CACHE_MS = 6 * 60 * 60_000;
+const LOGO_NEGATIVE_CACHE_MS = 15 * 60_000;
+const logoCache = new Map();
 const STALE_AFTER_MS = 150_000;
 const securityCache = new Map();
 let cache = { at: 0, payload: null };
@@ -64,19 +68,7 @@ const { assessMarketRisk } = require("./lib/risk");
 const performanceTracker = createPerformanceTracker();
 let securityChecksThisRefresh = 0;
 
-function classifySecurityReport(report) {
-  if (!report || typeof report !== "object") return { status: "UNAVAILABLE", score: null, flags: [], reasons: [] };
-  const score = Number.isFinite(Number(report.score_normalised)) ? Number(report.score_normalised) : null;
-  const risks = Array.isArray(report.risks) ? report.risks : [];
-  const flags = risks.map(r => String(r?.name || "RugCheck risk")).filter(Boolean);
-  const critical = Boolean(report.rugged) ||
-    risks.some(r => /danger|critical|high/i.test(String(r?.level || ""))) ||
-    risks.some(r => /rugged|honeypot|mint authority|freeze authority/i.test(String(r?.name || ""))) ||
-    (score !== null && score >= 70);
-  const caution = risks.length > 0 || (score !== null && score >= 35);
-  return { status: critical ? "HIGH_RISK" : caution ? "CAUTION" : "NO_MAJOR_FLAGS", score, flags,
-    reasons: [...flags, ...(report.rugged ? ["RugCheck marks this token as rugged"] : [])] };
-}
+const { classifySecurityReport } = require("./lib/security");
 
 async function applySecurityChecks(tokens) {
   const now = Date.now();
@@ -127,6 +119,31 @@ async function applySecurityChecks(tokens) {
     if (token.securityStatus === "HIGH_RISK") token.reasons = [...(token.reasons || []), "RugCheck reported high-risk security signals"];
     else if (token.securityStatus === "UNAVAILABLE") token.reasons = [...(token.reasons || []), "Security unverified: RugCheck has not returned a fresh report"];
   }
+  return tokens;
+}
+
+async function resolveMissingLogos(tokens) {
+  const now = Date.now();
+  for (const token of tokens) {
+    if (token.imageUrl) logoCache.set(token.mint, { at: now, url: token.imageUrl });
+    else {
+      const cached = logoCache.get(token.mint);
+      if (cached && now - cached.at < (cached.url ? LOGO_CACHE_MS : LOGO_NEGATIVE_CACHE_MS) && cached.url) token.imageUrl = cached.url;
+    }
+  }
+  const candidates = tokens.filter(token => {
+    if (token.imageUrl) return false;
+    const cached = logoCache.get(token.mint);
+    return !cached || now - cached.at >= (cached.url ? LOGO_CACHE_MS : LOGO_NEGATIVE_CACHE_MS);
+  }).slice(0, LOGO_SCAN_LIMIT);
+  await Promise.all(candidates.map(async token => {
+    const result = await trackedFetch("geckoterminal_token_logo",
+      "https://api.geckoterminal.com/api/v2/networks/solana/tokens/" + encodeURIComponent(token.mint), true);
+    const attrs = result?.data?.attributes || {};
+    const url = attrs.image_url || attrs.imageUrl || null;
+    logoCache.set(token.mint, { at: Date.now(), url });
+    if (url) token.imageUrl = url;
+  }));
   return tokens;
 }
 
@@ -325,6 +342,7 @@ async function loadCandidates() {
   let tokens = [...best.values()].sort((a, b) => b.score - a.score);
   // Market-pattern heuristics and RugCheck security reports are separate signals.
   // Check the top candidates with a 10-minute per-mint cache; unavailable reports remain explicitly unverified.
+  tokens = await resolveMissingLogos(tokens);
   tokens = await applySecurityChecks(tokens);
   counts.securityScanned = tokens.filter(token => token.securityStatus && token.securityStatus !== "UNAVAILABLE").length;
   counts.securityCoveragePct = tokens.length ? Math.round((counts.securityScanned / tokens.length) * 100) : 0;
@@ -368,9 +386,8 @@ app.get("/api/scan", async (req, res) => {
     description: String(r.description || ""), value: String(r.value || "")
   })) : [];
   const normalizedScore = Number.isFinite(Number(rugReport?.score_normalised)) ? Number(rugReport.score_normalised) : null;
-  const critical = risks.some(r => /danger|critical|high/i.test(r.level)) ||
-    risks.some(r => /rugged|honeypot|mint authority|freeze authority/i.test(r.name));
-  const rugStatus = rugReport ? (rugReport.rugged || critical || (normalizedScore !== null && normalizedScore >= 70) ? "HIGH RISK" : (normalizedScore !== null && normalizedScore >= 35 || risks.length ? "CAUTION" : "NO MAJOR FLAGS REPORTED")) : "UNAVAILABLE";
+  const securityAssessment = classifySecurityReport(rugReport);
+  const rugStatus = securityAssessment.status === "NO_MAJOR_FLAGS" ? "NO MAJOR FLAGS REPORTED" : securityAssessment.status === "HIGH_RISK" ? "HIGH RISK" : securityAssessment.status;
   return res.json({
     ok: true, mint, scannedAt: new Date().toISOString(),
     token: pair ? {
