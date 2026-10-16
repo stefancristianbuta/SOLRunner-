@@ -3,13 +3,18 @@ const path = require("path");
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_MS = 60_000;
-const GECKO_MIN_INTERVAL_MS = 1_500;
+const GECKO_MIN_INTERVAL_MS = 2_000;
+const GECKO_429_BACKOFF_MS = 60_000;
+const LOGO_429_BACKOFF_MS = 5 * 60_000;
 let lastGeckoRequestAt = 0;
+let geckoBlockedUntil = 0;
+let logoBlockedUntil = 0;
+let geckoRequestQueue = Promise.resolve();
 const MIN_LIQUIDITY_USD = 20_000;
 const MAX_ADDRESSES = 240;
 const SECURITY_CACHE_MS = 10 * 60_000;
 const SECURITY_SCAN_LIMIT = 16;
-const LOGO_SCAN_LIMIT = 4;
+const LOGO_SCAN_LIMIT = 1;
 const LOGO_CACHE_MS = 6 * 60 * 60_000;
 const LOGO_NEGATIVE_CACHE_MS = 15 * 60_000;
 const logoCache = new Map();
@@ -27,11 +32,20 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const addressFromGeckoId = id => String(id || "").startsWith("solana_") ? String(id).slice(7) : "";
 
 async function trackedFetch(moduleName, url, optional = false) {
-  // GeckoTerminal public API: spread requests out instead of firing a burst of four at once.
+  // Serialize GeckoTerminal request starts. A shared timestamp alone is not sufficient
+  // when several callers reach this function concurrently.
   if (url.startsWith("https://api.geckoterminal.com/")) {
-    const waitMs = Math.max(0, lastGeckoRequestAt + GECKO_MIN_INTERVAL_MS - Date.now());
-    if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
-    lastGeckoRequestAt = Date.now();
+    let release;
+    const previous = geckoRequestQueue;
+    geckoRequestQueue = new Promise(resolve => { release = resolve; });
+    await previous;
+    try {
+      const waitMs = Math.max(0, lastGeckoRequestAt + GECKO_MIN_INTERVAL_MS - Date.now(), geckoBlockedUntil - Date.now());
+      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+      lastGeckoRequestAt = Date.now();
+    } finally {
+      release();
+    }
   }
   const start = Date.now();
   const entry = telemetry.modules[moduleName] || { calls: 0, successes: 0, failures: 0, lastMs: null, avgMs: null, lastStatus: "never", lastError: null };
@@ -41,7 +55,13 @@ async function trackedFetch(moduleName, url, optional = false) {
       headers: { accept: "application/json", "user-agent": "SOLRunner/0.4" },
       signal: AbortSignal.timeout(9000)
     });
-    if (!response.ok) throw new Error("HTTP " + response.status);
+    if (!response.ok) {
+      const error = new Error("HTTP " + response.status);
+      error.status = response.status;
+      const retryAfter = Number(response.headers.get("retry-after"));
+      error.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : null;
+      throw error;
+    }
     const data = await response.json();
     const ms = Date.now() - start;
     entry.successes++;
@@ -52,6 +72,10 @@ async function trackedFetch(moduleName, url, optional = false) {
     telemetry.modules[moduleName] = entry;
     return data;
   } catch (error) {
+    if (url.startsWith("https://api.geckoterminal.com/") && error.status === 429) {
+      geckoBlockedUntil = Math.max(geckoBlockedUntil, Date.now() + (error.retryAfterMs || GECKO_429_BACKOFF_MS));
+      if (moduleName === "geckoterminal_token_logo") logoBlockedUntil = Math.max(logoBlockedUntil, Date.now() + LOGO_429_BACKOFF_MS);
+    }
     entry.failures++;
     entry.lastMs = Date.now() - start;
     entry.lastStatus = optional ? "degraded" : "error";
@@ -131,6 +155,7 @@ async function resolveMissingLogos(tokens) {
       if (cached && now - cached.at < (cached.url ? LOGO_CACHE_MS : LOGO_NEGATIVE_CACHE_MS) && cached.url) token.imageUrl = cached.url;
     }
   }
+  if (now < logoBlockedUntil) return tokens;
   const candidates = tokens.filter(token => {
     if (token.imageUrl) return false;
     const cached = logoCache.get(token.mint);
