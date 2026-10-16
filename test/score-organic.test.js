@@ -28,3 +28,21 @@ test("near-perfect one-sided flow ranks below healthier buy pressure", () => {
     30, 50000, 7000, 33, 1, { buyers: 20, sellers: 1 });
   assert.ok(balanced > oneSided);
 });
+
+test("token age does not reduce the score when market signals are identical", () => {
+  const pair = { priceChange: { m5: 6, h1: 14 }, txns: { h1: { buys: 90, sells: 45 } } };
+  const signal = { buyers: 24, sellers: 12 };
+  const recent = scorePair(pair, 10, 60000, 8000, 24, 12, signal);
+  const older = scorePair(pair, 1440, 60000, 8000, 24, 12, signal);
+  assert.equal(recent, older);
+});
+
+test("missing market evidence lowers confidence compared with sustained observed activity", () => {
+  const active = scorePair({
+    priceChange: { m5: 6, h1: 14 },
+    txns: { h1: { buys: 90, sells: 45 } }
+  }, 60, 60000, 8000, 24, 12, { buyers: 24, sellers: 12 });
+  const missing = scorePair({ priceChange: { m5: 0, h1: 0 }, txns: {} },
+    60, 60000, 0, 0, 0, {});
+  assert.ok(active > missing, `active ${active} should exceed incomplete ${missing}`);
+});
