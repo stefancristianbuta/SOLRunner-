@@ -35,8 +35,8 @@ const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 function render(){
  const sort=$("#sortBy").value;
  let rows=tokens.filter(t=>Number(t.liquidityUsd)>=20000);
- if(activeFilter==="strong")rows=rows.filter(t=>Number(t.score)>=85);
- if(activeFilter==="risk")rows=rows.filter(t=>t.riskStatus==="UNVERIFIED");
+ if(activeFilter==="flagged")rows=rows.filter(t=>t.suspectedArtificialPump);
+ else {rows=rows.filter(t=>!t.suspectedArtificialPump);if(activeFilter==="strong")rows=rows.filter(t=>Number(t.score)>=85);}
  rows.sort((a,b)=>sort==="volume"?b.volume5m-a.volume5m:sort==="liquidity"?b.liquidityUsd-a.liquidityUsd:sort==="age"?a.ageMin-b.ageMin:b.score-a.score);
  $("#eligible").textContent=tokens.filter(t=>t.liquidityUsd>=20000&&!t.suspectedArtificialPump).length;
  $("#high").textContent=tokens.filter(t=>t.score>=85&&t.liquidityUsd>=20000).length;
