@@ -83,13 +83,16 @@ async function applySecurityChecks(tokens) {
         risks.some(r => /danger|critical|high/i.test(String(r.level || ""))) ||
         risks.some(r => /rugged|honeypot|mint authority|freeze authority/i.test(String(r.name || ""))) ||
         (token.securityScore !== null && token.securityScore >= 70);
-      if (report) token.securityStatus = critical ? "HIGH_RISK" : (risks.length || (token.securityScore !== null && token.securityScore >= 35) ? "CAUTION" : "CLEAR");
+      if (report) token.securityStatus = critical ? "HIGH_RISK" : (risks.length || (token.securityScore !== null && token.securityScore >= 35) ? "CAUTION" : "NO_MAJOR_FLAGS");
       token.securityFlags = flags;
       token.riskFlags = [...new Set([...(token.riskFlags || []), ...flags])];
       if (critical) {
-        token.suspectedArtificialPump = true;
-        token.riskStatus = "HIGH_RISK";
+        // Keep on-chain security findings separate from market-pattern pump heuristics.
+        token.securityStatus = "HIGH_RISK";
+        token.securityReasons = [...flags, ...(rugReport?.rugged ? ["RugCheck marks this token as rugged"] : [])];
         token.reasons = [...(token.reasons || []), "RugCheck reported high-risk security signals"];
+      } else {
+        token.securityReasons = flags;
       }
     }));
   }
