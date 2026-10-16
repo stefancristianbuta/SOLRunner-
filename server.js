@@ -62,6 +62,7 @@ const { scorePair } = require("./lib/score");
 const { createPerformanceTracker } = require("./lib/performance");
 const { assessMarketRisk } = require("./lib/risk");
 const performanceTracker = createPerformanceTracker();
+let securityChecksThisRefresh = 0;
 
 function classifySecurityReport(report) {
   if (!report || typeof report !== "object") return { status: "UNAVAILABLE", score: null, flags: [], reasons: [] };
@@ -79,6 +80,7 @@ function classifySecurityReport(report) {
 
 async function applySecurityChecks(tokens) {
   const now = Date.now();
+  securityChecksThisRefresh = 0;
   for (const token of tokens) {
     const cached = securityCache.get(token.mint);
     if (cached?.report && now - cached.at < SECURITY_CACHE_MS) {
@@ -106,6 +108,7 @@ async function applySecurityChecks(tokens) {
       if (!report) { securityCache.delete(token.mint); return; }
       const checkedAt = Date.now();
       securityCache.set(token.mint, { at: checkedAt, report });
+      securityChecksThisRefresh++;
       const assessment = classifySecurityReport(report);
       token.securityCheckedAt = new Date(checkedAt).toISOString();
       token.securityStatus = assessment.status;
@@ -326,7 +329,7 @@ async function loadCandidates() {
   counts.securityScanned = tokens.filter(token => token.securityStatus && token.securityStatus !== "UNAVAILABLE").length;
   counts.securityCoveragePct = tokens.length ? Math.round((counts.securityScanned / tokens.length) * 100) : 0;
   counts.securityPending = tokens.filter(token => token.securityStatus === "UNAVAILABLE").length;
-  counts.securityCheckedThisRefresh = tokens.filter(token => token.securityCheckedAt && Date.now() - Date.parse(token.securityCheckedAt) < 1000).length;
+  counts.securityCheckedThisRefresh = securityChecksThisRefresh;
   counts.securityUnavailable = tokens.filter(token => token.securityStatus === "UNAVAILABLE").length;
   counts.securityHighRisk = tokens.filter(token => token.securityStatus === "HIGH_RISK").length;
   counts.securityCaution = tokens.filter(token => token.securityStatus === "CAUTION").length;
