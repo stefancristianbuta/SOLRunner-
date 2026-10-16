@@ -33,3 +33,50 @@ test("high-score cohort is reported separately", () => {
   assert.equal(result.highScoreSamples, 1);
   assert.equal(result.highScoreWinRatePct, 100);
 });
+
+
+test("reports score buckets, positive/negative/neutral counts, median and observation delay", () => {
+  const tracker = createPerformanceTracker();
+  const start = 1_000_000;
+  tracker.observe([
+    { mint: "low", priceUsd: 1, score: 40 },
+    { mint: "watch", priceUsd: 2, score: 65 },
+    { mint: "strong", priceUsd: 4, score: 78 },
+    { mint: "high", priceUsd: 8, score: 90 }
+  ], start);
+  tracker.observe([
+    { mint: "low", priceUsd: 1.1, score: 99 },
+    { mint: "watch", priceUsd: 1.8, score: 99 },
+    { mint: "strong", priceUsd: 4, score: 99 },
+    { mint: "high", priceUsd: 8.8, score: 99 }
+  ], start + 5 * 60_000 + 15_000);
+  const five = tracker.snapshot().fiveMinutes;
+  assert.equal(five.samples, 4);
+  assert.equal(five.positive, 2);
+  assert.equal(five.negative, 1);
+  assert.equal(five.neutral, 1);
+  assert.equal(five.medianObservationDelaySeconds, 15);
+  assert.equal(five.scoreBuckets.under58.samples, 1);
+  assert.equal(five.scoreBuckets.watch.negative, 1);
+  assert.equal(five.scoreBuckets.strong.neutral, 1);
+  assert.equal(five.scoreBuckets.high.positive, 1);
+  assert.equal(five.scoreBuckets.high.winRatePct, 100);
+});
+
+test("reports median separately from average when returns contain an outlier", () => {
+  const tracker = createPerformanceTracker();
+  const start = 2_000_000;
+  tracker.observe([
+    { mint: "a", priceUsd: 1, score: 60 },
+    { mint: "b", priceUsd: 1, score: 60 },
+    { mint: "c", priceUsd: 1, score: 60 }
+  ], start);
+  tracker.observe([
+    { mint: "a", priceUsd: 1.01, score: 60 },
+    { mint: "b", priceUsd: 1.02, score: 60 },
+    { mint: "c", priceUsd: 2, score: 60 }
+  ], start + 5 * 60_000);
+  const five = tracker.snapshot().fiveMinutes;
+  assert.equal(five.medianReturnPct, 2);
+  assert.ok(five.averageReturnPct > five.medianReturnPct);
+});
