@@ -34,7 +34,7 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const addressFromGeckoId = id => String(id || "").startsWith("solana_") ? String(id).slice(7) : "";
 const { parseRetryAfter, logoBackoffMs } = require("./lib/gecko-backoff");
 
-async function trackedFetch(moduleName, url, optional = false) {
+async function trackedFetch(moduleName, url, optional = false, extraHeaders = {}) {
   const isGecko = url.startsWith("https://api.geckoterminal.com/");
   let releaseQueue = null;
   if (isGecko) {
@@ -67,7 +67,7 @@ async function trackedFetch(moduleName, url, optional = false) {
     entry.calls++;
     try {
       const response = await fetch(url, {
-        headers: { accept: "application/json;version=20230203", "user-agent": "SOLRunner/0.4" },
+        headers: { accept: "application/json;version=20230203", "user-agent": "SOLRunner/0.4", ...extraHeaders },
         signal: AbortSignal.timeout(9000)
       });
       if (!response.ok) {
@@ -243,9 +243,13 @@ async function resolveMissingLogos(tokens) {
     // Try Jupiter's public mint lookup as a third source; this endpoint has a
     // separate rate limit and is called only for the small rotating fallback batch.
     telemetry.logoResolution.jupiterLookups++;
+    const jupiterHeaders = process.env.JUPITER_API_KEY ? { "x-api-key": process.env.JUPITER_API_KEY } : {};
     const jupiter = await trackedFetch("jupiter_token_logo",
-      "https://tokens.jup.ag/token/" + encodeURIComponent(token.mint), true);
-    const jupiterUrl = safeImageUrl(jupiter?.logoURI || jupiter?.logoUri || jupiter?.icon || null);
+      "https://api.jup.ag/tokens/v2/search?query=" + encodeURIComponent(token.mint), true, jupiterHeaders);
+    const jupiterToken = Array.isArray(jupiter)
+      ? jupiter.find(item => item?.id === token.mint || item?.address === token.mint || item?.mint === token.mint) || jupiter[0]
+      : jupiter?.token || jupiter;
+    const jupiterUrl = safeImageUrl(jupiterToken?.icon || jupiterToken?.logoURI || jupiterToken?.logoUri || null);
     if (jupiterUrl) {
       telemetry.logoResolution.jupiterFound++;
       token.imageUrl = jupiterUrl;
