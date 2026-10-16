@@ -7,6 +7,9 @@ const GECKO_MIN_INTERVAL_MS = 1_500;
 let lastGeckoRequestAt = 0;
 const MIN_LIQUIDITY_USD = 20_000;
 const MAX_ADDRESSES = 240;
+const SECURITY_CACHE_MS = 10 * 60_000;
+const SECURITY_SCAN_LIMIT = 20;
+const securityCache = new Map();
 let cache = { at: 0, payload: null };
 let refreshInFlight = null;
 let lastError = null;
@@ -58,6 +61,40 @@ const { scorePair } = require("./lib/score");
 const { createPerformanceTracker } = require("./lib/performance");
 const { assessMarketRisk } = require("./lib/risk");
 const performanceTracker = createPerformanceTracker();
+
+async function applySecurityChecks(tokens) {
+  const selected = tokens.slice(0, SECURITY_SCAN_LIMIT);
+  for (let offset = 0; offset < selected.length; offset += 4) {
+    const batch = selected.slice(offset, offset + 4);
+    await Promise.all(batch.map(async token => {
+      let cached = securityCache.get(token.mint);
+      if (!cached || Date.now() - cached.at >= SECURITY_CACHE_MS) {
+        const report = await trackedFetch("rugcheck_radar", "https://api.rugcheck.xyz/v1/tokens/" + encodeURIComponent(token.mint) + "/report/summary", true);
+        cached = { at: Date.now(), report };
+        securityCache.set(token.mint, cached);
+      }
+      const report = cached.report;
+      token.securityCheckedAt = report ? new Date(cached.at).toISOString() : null;
+      token.securityStatus = report ? "CLEAR" : "UNAVAILABLE";
+      token.securityScore = Number.isFinite(Number(report?.score_normalised)) ? Number(report.score_normalised) : null;
+      const risks = Array.isArray(report?.risks) ? report.risks : [];
+      const flags = risks.map(r => String(r.name || "RugCheck risk")).filter(Boolean);
+      const critical = Boolean(report?.rugged) ||
+        risks.some(r => /danger|critical|high/i.test(String(r.level || ""))) ||
+        risks.some(r => /rugged|honeypot|mint authority|freeze authority/i.test(String(r.name || ""))) ||
+        (token.securityScore !== null && token.securityScore >= 70);
+      if (report) token.securityStatus = critical ? "HIGH_RISK" : (risks.length || (token.securityScore !== null && token.securityScore >= 35) ? "CAUTION" : "CLEAR");
+      token.securityFlags = flags;
+      token.riskFlags = [...new Set([...(token.riskFlags || []), ...flags])];
+      if (critical) {
+        token.suspectedArtificialPump = true;
+        token.riskStatus = "HIGH_RISK";
+        token.reasons = [...(token.reasons || []), "RugCheck reported high-risk security signals"];
+      }
+    }));
+  }
+  return tokens;
+}
 
 async function loadCandidates() {
   const runStart = Date.now();
@@ -244,6 +281,10 @@ async function loadCandidates() {
   }
 
   const tokens = [...best.values()].sort((a, b) => b.score - a.score);
+  await applySecurityChecks(tokens);
+  counts.securityScanned = Math.min(tokens.length, SECURITY_SCAN_LIMIT);
+  counts.securityHighRisk = tokens.filter(token => token.securityStatus === "HIGH_RISK").length;
+  counts.suspectedPumpPatterns = tokens.filter(token => token.suspectedArtificialPump).length;
   counts.uniqueEligibleTokens = tokens.length;
   performanceTracker.observe(tokens);
   counts.tokensWithLogo = tokens.filter(token => Boolean(token.imageUrl)).length;
