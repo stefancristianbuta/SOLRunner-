@@ -24,7 +24,7 @@ const securityCache = new Map();
 let cache = { at: 0, payload: null };
 let refreshInFlight = null;
 let lastError = null;
-const telemetry = { lastRunAt: null, lastDurationMs: null, runs: 0, failures: 0, modules: {}, lastPipeline: {} };
+const telemetry = { lastRunAt: null, lastDurationMs: null, runs: 0, failures: 0, modules: {}, lastPipeline: {}, logoResolution: { geckoLookups: 0, geckoFound: 0, dexLookups: 0, dexFound: 0, noImage: 0, invalidImageUrl: 0 } };
 
 app.disable("x-powered-by");
 app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true, setHeaders(res, filePath) { if (filePath.endsWith(".html")) res.setHeader("Cache-Control", "no-store, max-age=0, must-revalidate"); } }));
@@ -195,12 +195,16 @@ async function resolveMissingLogos(tokens) {
   if (Date.now() >= logoBlockedUntil && Date.now() >= geckoBlockedUntil) {
     const geckoCandidates = candidates.slice(0, LOGO_SCAN_LIMIT);
     for (const token of geckoCandidates) {
+      telemetry.logoResolution.geckoLookups++;
       const result = await trackedFetch("geckoterminal_token_logo",
         "https://api.geckoterminal.com/api/v2/networks/solana/tokens/" + encodeURIComponent(token.mint) + "/info", true);
       if (result) {
         const attrs = result?.data?.attributes || {};
-        const url = attrs.image_url || attrs.imageUrl || attrs.image?.large || attrs.image?.small || attrs.image?.thumb || null;
+        const rawUrl = attrs.image_url || attrs.imageUrl || attrs.image?.large || attrs.image?.small || attrs.image?.thumb || null;
+        const url = safeImageUrl(rawUrl);
+        if (rawUrl && !url) telemetry.logoResolution.invalidImageUrl++;
         if (url) {
+          telemetry.logoResolution.geckoFound++;
           token.imageUrl = url;
           logoCache.set(token.mint, { at: Date.now(), url, source: "geckoterminal" });
         } else {
@@ -215,20 +219,21 @@ async function resolveMissingLogos(tokens) {
   // is cooling down. This host has separate rate limits and often has pair-level image metadata.
   const dexCandidates = candidates.filter(token => !token.imageUrl).slice(0, DEX_LOGO_SCAN_LIMIT);
   for (const token of dexCandidates) {
+    telemetry.logoResolution.dexLookups++;
     const result = await trackedFetch("dexscreener_token_logo",
       "https://api.dexscreener.com/latest/dex/tokens/" + encodeURIComponent(token.mint), true);
     const pairs = Array.isArray(result?.pairs) ? result.pairs : [];
-    const matching = pairs.filter(pair => pair?.chainId === "solana" &&
-      (pair.baseToken?.address === token.mint || pair.quoteToken?.address === token.mint));
+    const matching = pairs.filter(pair => pair?.chainId === "solana" && pair.baseToken?.address === token.mint);
     matching.sort((a, b) => n(b.liquidity?.usd) - n(a.liquidity?.usd));
     let url = null;
     for (const pair of matching) {
       const info = pair?.info || {};
-      url = info.imageUrl || info.icon || info.header || info.openGraph?.image || null;
+      url = safeImageUrl(info.imageUrl || info.icon || info.header || info.openGraph?.image || null);
       if (url) break;
     }
     logoCache.set(token.mint, { at: Date.now(), url, source: url ? "dexscreener" : "no-image" });
-    if (url) token.imageUrl = url;
+    if (url) { telemetry.logoResolution.dexFound++; token.imageUrl = url; }
+    else telemetry.logoResolution.noImage++;
   }
   return tokens;
 }
@@ -533,7 +538,7 @@ app.get("/api/telemetry", (_req, res) => res.json({
   ok: true, generatedAt: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()),
   cache: { ageSeconds: cache.at ? Math.round((Date.now() - cache.at) / 1000) : null, hasSnapshot: Boolean(cache.payload), stale: !cache.at || Date.now() - cache.at > STALE_AFTER_MS, staleAfterSeconds: STALE_AFTER_MS / 1000, tokenCount: cache.payload?.count || 0 },
   refresh: { intervalSeconds: 60, runs: telemetry.runs, failures: telemetry.failures, lastRunAt: telemetry.lastRunAt, lastSuccessAt: cache.payload?.updatedAt || null, lastSuccessAgeSeconds: cache.at ? Math.floor((Date.now() - cache.at) / 1000) : null, lastDurationMs: telemetry.lastDurationMs, lastError },
-  modules: telemetry.modules, pipeline: telemetry.lastPipeline,
+  modules: telemetry.modules, pipeline: telemetry.lastPipeline, logoResolution: telemetry.logoResolution,
   rateLimits: { geckoBlockedForSeconds: Math.max(0, Math.ceil((geckoBlockedUntil - Date.now()) / 1000)), logoBlockedForSeconds: Math.max(0, Math.ceil((logoBlockedUntil - Date.now()) / 1000)), logo429Streak },
   performance: performanceTracker.snapshot()
 }));
