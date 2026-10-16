@@ -8,7 +8,8 @@ let lastGeckoRequestAt = 0;
 const MIN_LIQUIDITY_USD = 20_000;
 const MAX_ADDRESSES = 240;
 const SECURITY_CACHE_MS = 10 * 60_000;
-const SECURITY_SCAN_LIMIT = 8;
+const SECURITY_SCAN_LIMIT = 16;
+const STALE_AFTER_MS = 150_000;
 const securityCache = new Map();
 let cache = { at: 0, payload: null };
 let refreshInFlight = null;
@@ -62,39 +63,66 @@ const { createPerformanceTracker } = require("./lib/performance");
 const { assessMarketRisk } = require("./lib/risk");
 const performanceTracker = createPerformanceTracker();
 
+function classifySecurityReport(report) {
+  if (!report || typeof report !== "object") return { status: "UNAVAILABLE", score: null, flags: [], reasons: [] };
+  const score = Number.isFinite(Number(report.score_normalised)) ? Number(report.score_normalised) : null;
+  const risks = Array.isArray(report.risks) ? report.risks : [];
+  const flags = risks.map(r => String(r?.name || "RugCheck risk")).filter(Boolean);
+  const critical = Boolean(report.rugged) ||
+    risks.some(r => /danger|critical|high/i.test(String(r?.level || ""))) ||
+    risks.some(r => /rugged|honeypot|mint authority|freeze authority/i.test(String(r?.name || ""))) ||
+    (score !== null && score >= 70);
+  const caution = risks.length > 0 || (score !== null && score >= 35);
+  return { status: critical ? "HIGH_RISK" : caution ? "CAUTION" : "NO_MAJOR_FLAGS", score, flags,
+    reasons: [...flags, ...(report.rugged ? ["RugCheck marks this token as rugged"] : [])] };
+}
+
 async function applySecurityChecks(tokens) {
-  const selected = tokens.slice(0, SECURITY_SCAN_LIMIT);
-  for (let offset = 0; offset < selected.length; offset += 8) {
-    const batch = selected.slice(offset, offset + 8);
-    await Promise.all(batch.map(async token => {
-      let cached = securityCache.get(token.mint);
-      if (!cached || Date.now() - cached.at >= SECURITY_CACHE_MS) {
-        const report = await trackedFetch("rugcheck_radar", "https://api.rugcheck.xyz/v1/tokens/" + encodeURIComponent(token.mint) + "/report/summary", true);
-        cached = { at: Date.now(), report };
-        securityCache.set(token.mint, cached);
-      }
-      const report = cached.report;
-      token.securityCheckedAt = report ? new Date(cached.at).toISOString() : null;
-      token.securityStatus = report ? "CLEAR" : "UNAVAILABLE";
-      token.securityScore = Number.isFinite(Number(report?.score_normalised)) ? Number(report.score_normalised) : null;
-      const risks = Array.isArray(report?.risks) ? report.risks : [];
-      const flags = risks.map(r => String(r.name || "RugCheck risk")).filter(Boolean);
-      const critical = Boolean(report?.rugged) ||
-        risks.some(r => /danger|critical|high/i.test(String(r.level || ""))) ||
-        risks.some(r => /rugged|honeypot|mint authority|freeze authority/i.test(String(r.name || ""))) ||
-        (token.securityScore !== null && token.securityScore >= 70);
-      if (report) token.securityStatus = critical ? "HIGH_RISK" : (risks.length || (token.securityScore !== null && token.securityScore >= 35) ? "CAUTION" : "NO_MAJOR_FLAGS");
-      token.securityFlags = flags;
-      token.riskFlags = [...new Set([...(token.riskFlags || []), ...flags])];
-      if (critical) {
-        // Keep on-chain security findings separate from market-pattern pump heuristics.
-        token.securityStatus = "HIGH_RISK";
-        token.securityReasons = [...flags, ...(report?.rugged ? ["RugCheck marks this token as rugged"] : [])];
-        token.reasons = [...(token.reasons || []), "RugCheck reported high-risk security signals"];
-      } else {
-        token.securityReasons = flags;
-      }
+  const now = Date.now();
+  for (const token of tokens) {
+    const cached = securityCache.get(token.mint);
+    if (cached?.report && now - cached.at < SECURITY_CACHE_MS) {
+      const assessment = classifySecurityReport(cached.report);
+      token.securityCheckedAt = new Date(cached.at).toISOString();
+      token.securityStatus = assessment.status;
+      token.securityScore = assessment.score;
+      token.securityFlags = assessment.flags;
+      token.securityReasons = assessment.reasons;
+    } else {
+      token.securityCheckedAt = null;
+      token.securityStatus = "UNAVAILABLE";
+      token.securityScore = null;
+      token.securityFlags = [];
+      token.securityReasons = [];
+    }
+  }
+  const selected = tokens.filter(token => token.securityStatus === "UNAVAILABLE")
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+    .slice(0, SECURITY_SCAN_LIMIT);
+  for (let offset = 0; offset < selected.length; offset += 4) {
+    await Promise.all(selected.slice(offset, offset + 4).map(async token => {
+      const report = await trackedFetch("rugcheck_radar",
+        "https://api.rugcheck.xyz/v1/tokens/" + encodeURIComponent(token.mint) + "/report/summary", true);
+      if (!report) { securityCache.delete(token.mint); return; }
+      const checkedAt = Date.now();
+      securityCache.set(token.mint, { at: checkedAt, report });
+      const assessment = classifySecurityReport(report);
+      token.securityCheckedAt = new Date(checkedAt).toISOString();
+      token.securityStatus = assessment.status;
+      token.securityScore = assessment.score;
+      token.securityFlags = assessment.flags;
+      token.securityReasons = assessment.reasons;
     }));
+  }
+  for (const token of tokens) {
+    token.riskFlags = [...new Set([...(token.riskFlags || []), ...(token.securityFlags || [])])];
+    if (token.securityStatus === "HIGH_RISK" || token.suspectedArtificialPump) token.organicStatus = "FLAGGED";
+    else if (token.securityStatus === "NO_MAJOR_FLAGS" && token.score >= 72 &&
+      token.organicDataCoverage >= 4 && token.txns5m >= 12 && token.txns1h >= 40) token.organicStatus = "STRONG SIGNAL";
+    else if (token.score >= 58 && token.organicDataCoverage >= 3) token.organicStatus = "WATCH";
+    else token.organicStatus = "INSUFFICIENT DATA";
+    if (token.securityStatus === "HIGH_RISK") token.reasons = [...(token.reasons || []), "RugCheck reported high-risk security signals"];
+    else if (token.securityStatus === "UNAVAILABLE") token.reasons = [...(token.reasons || []), "Security unverified: RugCheck has not returned a fresh report"];
   }
   return tokens;
 }
@@ -249,7 +277,7 @@ async function loadCandidates() {
       organicDataCoverage: (n(changes.m5) !== 0 ? 1 : 0) + (n(changes.h1) !== 0 ? 1 : 0) + ((buys5 + sells5) > 0 ? 1 : 0) + (n(volume.m5) > 0 ? 1 : 0) + (n(txns.h1?.buys) + n(txns.h1?.sells) > 0 ? 1 : 0) + (n(geckoM5.buyers) > 0 ? 1 : 0),
       organicStatus: "ASSESSING",
       riskStatus: marketRisk.suspectedArtificialPump ? "SUSPECTED_PUMP" : "UNVERIFIED", riskFlags: marketRisk.flags, suspectedArtificialPump: marketRisk.suspectedArtificialPump, volumeLiquidityRatio: marketRisk.volumeLiquidityRatio, smartMoney: "NOT VERIFIED", holderCount: null,
-      reasons: ["Discovered from live pool/token feeds", buys5 > sells5 ? "More buys than sells in the last 5 minutes" : "Buy pressure is not confirmed", ...marketRisk.flags, "On-chain security report is not part of the radar feed"]
+      reasons: ["Discovered from live pool/token feeds", buys5 > sells5 ? "More buys than sells in the last 5 minutes" : "Buy pressure is not confirmed", ...marketRisk.flags]
     };
     candidate.organicStatus = candidate.suspectedArtificialPump ? "FLAGGED" :
       candidate.score >= 72 && candidate.organicDataCoverage >= 4 && candidate.txns5m >= 12 && candidate.txns1h >= 40 ? "STRONG SIGNAL" :
@@ -296,6 +324,9 @@ async function loadCandidates() {
   // Check the top candidates with a 10-minute per-mint cache; unavailable reports remain explicitly unverified.
   tokens = await applySecurityChecks(tokens);
   counts.securityScanned = tokens.filter(token => token.securityStatus && token.securityStatus !== "UNAVAILABLE").length;
+  counts.securityCoveragePct = tokens.length ? Math.round((counts.securityScanned / tokens.length) * 100) : 0;
+  counts.securityPending = tokens.filter(token => token.securityStatus === "UNAVAILABLE").length;
+  counts.securityCheckedThisRefresh = tokens.filter(token => token.securityCheckedAt && Date.now() - Date.parse(token.securityCheckedAt) < 1000).length;
   counts.securityUnavailable = tokens.filter(token => token.securityStatus === "UNAVAILABLE").length;
   counts.securityHighRisk = tokens.filter(token => token.securityStatus === "HIGH_RISK").length;
   counts.securityCaution = tokens.filter(token => token.securityStatus === "CAUTION").length;
@@ -356,7 +387,16 @@ app.get("/api/scan", async (req, res) => {
     sources: { rugcheck: "https://rugcheck.xyz/tokens/" + mint, dexscreener: "https://dexscreener.com/solana/" + mint }
   });
 });
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "SOLRunner", dataProvider: "GeckoTerminal discovery + DexScreener search/market APIs", cached: Boolean(cache.payload), lastUpdated: cache.at || null }));
+app.get("/api/health", (_req, res) => {
+  const ageMs = cache.at ? Date.now() - cache.at : null;
+  const stale = ageMs === null || ageMs > STALE_AFTER_MS || Boolean(lastError);
+  res.status(stale ? 503 : 200).json({ ok: !stale, service: "SOLRunner",
+    dataProvider: "GeckoTerminal discovery + DexScreener search/market APIs",
+    cached: Boolean(cache.payload), lastUpdated: cache.payload?.updatedAt || null,
+    snapshotAgeSeconds: ageMs === null ? null : Math.floor(ageMs / 1000),
+    staleAfterSeconds: STALE_AFTER_MS / 1000, refreshInFlight: Boolean(refreshInFlight),
+    refreshFailures: telemetry.failures, lastError });
+});
 async function refreshSnapshot() {
   if (refreshInFlight) return refreshInFlight;
   refreshInFlight = loadCandidates().then(tokens => {
@@ -385,11 +425,11 @@ app.get("/api/tokens", async (_req, res) => {
 });
 app.get("/api/telemetry", (_req, res) => res.json({
   ok: true, generatedAt: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()),
-  cache: { ageSeconds: cache.at ? Math.round((Date.now() - cache.at) / 1000) : null, hasSnapshot: Boolean(cache.payload), tokenCount: cache.payload?.count || 0 },
-  refresh: { intervalSeconds: 60, runs: telemetry.runs, failures: telemetry.failures, lastRunAt: telemetry.lastRunAt, lastSuccessAt: cache.payload?.updatedAt || null, lastDurationMs: telemetry.lastDurationMs, lastError },
+  cache: { ageSeconds: cache.at ? Math.round((Date.now() - cache.at) / 1000) : null, hasSnapshot: Boolean(cache.payload), stale: !cache.at || Date.now() - cache.at > STALE_AFTER_MS, staleAfterSeconds: STALE_AFTER_MS / 1000, tokenCount: cache.payload?.count || 0 },
+  refresh: { intervalSeconds: 60, runs: telemetry.runs, failures: telemetry.failures, lastRunAt: telemetry.lastRunAt, lastSuccessAt: cache.payload?.updatedAt || null, lastSuccessAgeSeconds: cache.at ? Math.floor((Date.now() - cache.at) / 1000) : null, lastDurationMs: telemetry.lastDurationMs, lastError },
   modules: telemetry.modules, pipeline: telemetry.lastPipeline, performance: performanceTracker.snapshot()
 }));
-app.get("/api/status", (_req, res) => res.json({ ok: true, lastUpdated: cache.at ? new Date(cache.at).toISOString() : null, lastError, hasSnapshot: Boolean(cache.payload) }));
+app.get("/api/status", (_req, res) => { const ageMs = cache.at ? Date.now() - cache.at : null; const stale = ageMs === null || ageMs > STALE_AFTER_MS || Boolean(lastError); res.status(stale ? 503 : 200).json({ ok: !stale, lastUpdated: cache.payload?.updatedAt || null, snapshotAgeSeconds: ageMs === null ? null : Math.floor(ageMs / 1000), stale, lastError, hasSnapshot: Boolean(cache.payload), refreshInFlight: Boolean(refreshInFlight) }); });
 app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 // Keep discovery and follow-through sampling alive even when no dashboard browser is open.
 const REFRESH_INTERVAL_MS = 60_000;
