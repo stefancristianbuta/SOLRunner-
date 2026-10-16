@@ -383,7 +383,7 @@ app.get("/api/tokens", async (_req, res) => {
 app.get("/api/telemetry", (_req, res) => res.json({
   ok: true, generatedAt: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()),
   cache: { ageSeconds: cache.at ? Math.round((Date.now() - cache.at) / 1000) : null, hasSnapshot: Boolean(cache.payload), tokenCount: cache.payload?.count || 0 },
-  refresh: { runs: telemetry.runs, failures: telemetry.failures, lastRunAt: telemetry.lastRunAt, lastDurationMs: telemetry.lastDurationMs, lastError },
+  refresh: { intervalSeconds: 60, runs: telemetry.runs, failures: telemetry.failures, lastRunAt: telemetry.lastRunAt, lastSuccessAt: cache.payload?.updatedAt || null, lastDurationMs: telemetry.lastDurationMs, lastError },
   modules: telemetry.modules, pipeline: telemetry.lastPipeline, performance: performanceTracker.snapshot()
 }));
 app.get("/api/status", (_req, res) => res.json({ ok: true, lastUpdated: cache.at ? new Date(cache.at).toISOString() : null, lastError, hasSnapshot: Boolean(cache.payload) }));
