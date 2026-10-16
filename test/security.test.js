@@ -16,5 +16,6 @@ test("danger or critical risk levels are high risk", () => {
   assert.equal(classifySecurityReport({ score_normalised: 10, risks: [{ name: "Holder concentration", level: "danger" }] }).status, "HIGH_RISK");
   assert.equal(classifySecurityReport({ score_normalised: 10, risks: [{ name: "Holder concentration", level: "critical" }] }).status, "HIGH_RISK");
 });
+test("descriptive high-risk levels are recognized", () => assert.equal(classifySecurityReport({ score_normalised: 10, risks: [{ name: "Holder concentration", level: "High Risk" }] }).status, "HIGH_RISK"));
 test("a low score and no risk items is not reported as a major flag", () => assert.equal(classifySecurityReport({ score_normalised: 10, risks: [] }).status, "NO_MAJOR_FLAGS"));
 test("rugged flag always takes precedence", () => assert.equal(classifySecurityReport({ rugged: true, score_normalised: 5, risks: [] }).status, "HIGH_RISK"));
