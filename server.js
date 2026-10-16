@@ -227,7 +227,7 @@ async function loadCandidates() {
       name: String(pair.baseToken.name || pair.baseToken.symbol || "Unknown token").slice(0, 80),
       mint, pairAddress: pair.pairAddress, dexId: pair.dexId || "unknown", chainId: pair.chainId || "solana",
       url: pair.url || "https://dexscreener.com/solana/" + pair.pairAddress,
-      imageUrl: tokenMetadata.get(mint)?.icon || info.imageUrl || null, header: tokenMetadata.get(mint)?.header || info.header || null, openGraph: info.openGraph || null,
+      imageUrl: tokenMetadata.get(mint)?.icon || info.imageUrl || info.header || info.openGraph?.image || null, header: tokenMetadata.get(mint)?.header || info.header || info.openGraph?.image || null, openGraph: info.openGraph || null,
       websites: (Array.isArray(info.websites) ? info.websites : []).slice(0, 8),
       socials: (Array.isArray(info.socials) ? info.socials : []).slice(0, 10),
       sources: [...(sourceMap.get(mint) || [])],
@@ -288,11 +288,15 @@ async function loadCandidates() {
     counts.fallbackGeckoTokens++;
   }
 
-  const tokens = [...best.values()].sort((a, b) => b.score - a.score);
-  // Keep radar refresh independent of the optional RugCheck API. Token scans call RugCheck on demand.
-  counts.securityScanned = 0;
-  counts.securityHighRisk = 0;
-  counts.suspectedPumpPatterns = tokens.filter(token => token.suspectedArtificialPump).length;
+  let tokens = [...best.values()].sort((a, b) => b.score - a.score);
+  // Market-pattern heuristics and RugCheck security reports are separate signals.
+  // Check the top candidates with a 10-minute per-mint cache; unavailable reports remain explicitly unverified.
+  tokens = await applySecurityChecks(tokens);
+  counts.securityScanned = tokens.filter(token => token.securityStatus && token.securityStatus !== "UNAVAILABLE").length;
+  counts.securityUnavailable = tokens.filter(token => token.securityStatus === "UNAVAILABLE").length;
+  counts.securityHighRisk = tokens.filter(token => token.securityStatus === "HIGH_RISK").length;
+  counts.securityCaution = tokens.filter(token => token.securityStatus === "CAUTION").length;
+  counts.suspectedPumpPatterns = tokens.filter(token => (token.riskFlags || []).length > 0 && token.suspectedArtificialPump).length;
   counts.uniqueEligibleTokens = tokens.length;
   performanceTracker.observe(tokens);
   counts.tokensWithLogo = tokens.filter(token => Boolean(token.imageUrl)).length;
@@ -350,23 +354,30 @@ app.get("/api/scan", async (req, res) => {
   });
 });
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "SOLRunner", dataProvider: "GeckoTerminal discovery + DexScreener search/market APIs", cached: Boolean(cache.payload), lastUpdated: cache.at || null }));
+async function refreshSnapshot() {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = loadCandidates().then(tokens => {
+    const updatedAt = new Date().toISOString();
+    cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new/trending/active pools + DexScreener search and market APIs", updatedAt, count: tokens.length, filters: { chain: "solana", minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
+    lastError = null;
+    return cache.payload;
+  }).catch(error => {
+    lastError = String(error.message || error);
+    telemetry.failures++;
+    throw error;
+  }).finally(() => { refreshInFlight = null; });
+  return refreshInFlight;
+}
+
 app.get("/api/tokens", async (_req, res) => {
   res.set("Cache-Control", "no-store");
   if (cache.payload && Date.now() - cache.at < CACHE_MS) return res.json({ ...cache.payload, cached: true });
   try {
-    if (!refreshInFlight) {
-      refreshInFlight = loadCandidates().then(tokens => {
-        cache = { at: Date.now(), payload: { ok: true, source: "GeckoTerminal new/trending/active pools + DexScreener search and market APIs", updatedAt: new Date().toISOString(), count: tokens.length, filters: { chain: "solana", minLiquidityUsd: MIN_LIQUIDITY_USD }, tokens } };
-        lastError = null;
-        return cache.payload;
-      }).finally(() => { refreshInFlight = null; });
-    }
-    const payload = await refreshInFlight;
-    return res.json({ ...payload, cached: true });
+    const payload = await refreshSnapshot();
+    return res.json({ ...payload, cached: false });
   } catch (error) {
-    lastError = String(error.message || error); telemetry.failures++;
     if (cache.payload) return res.status(200).json({ ...cache.payload, stale: true, warning: "Live refresh failed; showing last successful snapshot." });
-    return res.status(502).json({ ok: false, error: "Live market feed unavailable", detail: lastError, tokens: [], count: 0 });
+    return res.status(502).json({ ok: false, error: "Live market feed unavailable", detail: lastError || String(error.message || error), tokens: [], count: 0 });
   }
 });
 app.get("/api/telemetry", (_req, res) => res.json({
@@ -377,4 +388,14 @@ app.get("/api/telemetry", (_req, res) => res.json({
 }));
 app.get("/api/status", (_req, res) => res.json({ ok: true, lastUpdated: cache.at ? new Date(cache.at).toISOString() : null, lastError, hasSnapshot: Boolean(cache.payload) }));
 app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
-app.listen(PORT, "0.0.0.0", () => console.log("SOLRunner listening on port " + PORT));
+// Keep discovery and follow-through sampling alive even when no dashboard browser is open.
+const REFRESH_INTERVAL_MS = 60_000;
+const refreshTimer = setInterval(() => {
+  if (!refreshInFlight) refreshSnapshot().catch(error => console.error("Background refresh failed:", error.message || error));
+}, REFRESH_INTERVAL_MS);
+if (typeof refreshTimer.unref === "function") refreshTimer.unref();
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("SOLRunner listening on port " + PORT);
+  refreshSnapshot().catch(error => console.error("Initial refresh failed:", error.message || error));
+});
