@@ -105,11 +105,7 @@ function renderScan(data){
  result.innerHTML='<div class="head" style="margin-top:0"><h3>Token scan · '+esc(t.symbol||data.mint.slice(0,8)+"…")+'</h3><span class="pill">'+esc(data.mint.slice(0,7)+"…"+data.mint.slice(-5))+'</span></div>'+
  '<p class="scan-status '+statusClass+'">RugCheck: '+esc(s.status||"UNAVAILABLE")+'</p>'+
  '<p class="muted">'+esc(s.note||"Security report status unknown")+(s.normalizedScore!==null&&s.normalizedScore!==undefined?' · normalized score '+esc(s.normalizedScore):"")+'</p>'+
- (t.name?'<div class="metrics"><div class="metric"><label>Price</label><strong>
-$("#sortBy").addEventListener("change",render);
-document.querySelectorAll(".nav-tab").forEach(tab=>tab.addEventListener("click",()=>{document.querySelectorAll(".nav-tab").forEach(x=>x.classList.toggle("active",x===tab));document.querySelectorAll(".view").forEach(view=>view.classList.toggle("active",view.id===tab.dataset.view));if(tab.dataset.view==="telemetryView")refreshTelemetry();}));
-refresh();refreshTelemetry();setInterval(refresh,15000);setInterval(refreshTelemetry,15000);
-</script></body></html>+Number(t.priceUsd||0).toPrecision(7)+'</strong></div><div class="metric"><label>Liquidity</label><strong>'+money(t.liquidityUsd)+'</strong></div><div class="metric"><label>5m change</label><strong>'+Number(t.change5m||0).toFixed(2)+'%</strong></div></div>':'<p class="reason">No DexScreener market pair found for this mint.</p>')+
+ (t.name?'<div class="metrics"><div class="metric"><label>Price</label><strong>$'+Number(t.priceUsd||0).toPrecision(7)+'</strong></div><div class="metric"><label>Liquidity</label><strong>'+money(t.liquidityUsd)+'</strong></div><div class="metric"><label>5m change</label><strong>'+Number(t.change5m||0).toFixed(2)+'%</strong></div></div>':'<p class="reason">No DexScreener market pair found for this mint.</p>')+
  (s.liquidityLockedPct!==null&&s.liquidityLockedPct!==undefined?'<p class="muted">LP locked: '+esc(s.liquidityLockedPct)+'%</p>':"")+
  (risks?'<p><strong>Security flags</strong></p><ul class="risk-list">'+risks+'</ul>':'<p class="muted">No specific RugCheck risk items returned. This is not proof of safety.</p>')+
  (flags?'<p><strong>Market manipulation signals</strong></p><ul class="risk-list">'+flags+'</ul>':'')+
