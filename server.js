@@ -24,7 +24,7 @@ const securityCache = new Map();
 let cache = { at: 0, payload: null };
 let refreshInFlight = null;
 let lastError = null;
-const telemetry = { lastRunAt: null, lastDurationMs: null, runs: 0, failures: 0, modules: {}, lastPipeline: {}, logoResolution: { geckoLookups: 0, geckoFound: 0, dexLookups: 0, dexFound: 0, noImage: 0, invalidImageUrl: 0 } };
+const telemetry = { lastRunAt: null, lastDurationMs: null, runs: 0, failures: 0, modules: {}, lastPipeline: {}, logoResolution: { geckoLookups: 0, geckoFound: 0, dexLookups: 0, dexFound: 0, jupiterLookups: 0, jupiterFound: 0, noImage: 0, invalidImageUrl: 0 } };
 
 app.disable("x-powered-by");
 app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true, setHeaders(res, filePath) { if (filePath.endsWith(".html")) res.setHeader("Cache-Control", "no-store, max-age=0, must-revalidate"); } }));
@@ -232,9 +232,28 @@ async function resolveMissingLogos(tokens) {
       url = safeImageUrl(info.imageUrl || info.icon || info.header || info.openGraph?.image || null);
       if (url) break;
     }
-    logoCache.set(token.mint, { at: Date.now(), url, source: url ? "dexscreener" : "no-image" });
-    if (url) { telemetry.logoResolution.dexFound++; token.imageUrl = url; }
-    else telemetry.logoResolution.noImage++;
+    if (url) {
+      telemetry.logoResolution.dexFound++;
+      token.imageUrl = url;
+      logoCache.set(token.mint, { at: Date.now(), url, source: "dexscreener" });
+      continue;
+    }
+
+    // DexScreener often returns a valid market pair without image metadata.
+    // Try Jupiter's public mint lookup as a third source; this endpoint has a
+    // separate rate limit and is called only for the small rotating fallback batch.
+    telemetry.logoResolution.jupiterLookups++;
+    const jupiter = await trackedFetch("jupiter_token_logo",
+      "https://tokens.jup.ag/token/" + encodeURIComponent(token.mint), true);
+    const jupiterUrl = safeImageUrl(jupiter?.logoURI || jupiter?.logoUri || jupiter?.icon || null);
+    if (jupiterUrl) {
+      telemetry.logoResolution.jupiterFound++;
+      token.imageUrl = jupiterUrl;
+      logoCache.set(token.mint, { at: Date.now(), url: jupiterUrl, source: "jupiter" });
+    } else {
+      telemetry.logoResolution.noImage++;
+      logoCache.set(token.mint, { at: Date.now(), url: null, source: "no-image" });
+    }
   }
   return tokens;
 }
