@@ -15,6 +15,7 @@ const MAX_ADDRESSES = 240;
 const SECURITY_CACHE_MS = 10 * 60_000;
 const SECURITY_SCAN_LIMIT = 16;
 const LOGO_SCAN_LIMIT = 2;
+const DEX_LOGO_SCAN_LIMIT = 4;
 const LOGO_CACHE_MS = 6 * 60 * 60_000;
 const LOGO_NEGATIVE_CACHE_MS = 15 * 60_000;
 const logoCache = new Map();
@@ -172,27 +173,63 @@ async function applySecurityChecks(tokens) {
 async function resolveMissingLogos(tokens) {
   const now = Date.now();
   for (const token of tokens) {
-    if (token.imageUrl) logoCache.set(token.mint, { at: now, url: token.imageUrl });
-    else {
+    if (token.imageUrl) {
+      logoCache.set(token.mint, { at: now, url: token.imageUrl, source: "market-data" });
+    } else {
       const cached = logoCache.get(token.mint);
-      if (cached && now - cached.at < (cached.url ? LOGO_CACHE_MS : LOGO_NEGATIVE_CACHE_MS) && cached.url) token.imageUrl = cached.url;
+      if (cached && now - cached.at < (cached.url ? LOGO_CACHE_MS : LOGO_NEGATIVE_CACHE_MS) && cached.url) {
+        token.imageUrl = cached.url;
+      }
     }
   }
-  if (now < logoBlockedUntil) return tokens;
+
   const candidates = tokens.filter(token => {
     if (token.imageUrl) return false;
     const cached = logoCache.get(token.mint);
     return !cached || now - cached.at >= (cached.url ? LOGO_CACHE_MS : LOGO_NEGATIVE_CACHE_MS);
-  }).slice(0, LOGO_SCAN_LIMIT);
-  await Promise.all(candidates.map(async token => {
-    const result = await trackedFetch("geckoterminal_token_logo",
-      "https://api.geckoterminal.com/api/v2/networks/solana/tokens/" + encodeURIComponent(token.mint) + "/info", true);
-    if (!result && (Date.now() < logoBlockedUntil || Date.now() < geckoBlockedUntil)) return;
-    const attrs = result?.data?.attributes || {};
-    const url = attrs.image_url || attrs.imageUrl || attrs.image?.large || attrs.image?.small || attrs.image?.thumb || null;
-    logoCache.set(token.mint, { at: Date.now(), url });
+  }).slice(0, DEX_LOGO_SCAN_LIMIT);
+  if (!candidates.length) return tokens;
+
+  // GeckoTerminal remains the first metadata source, but its public API frequently
+  // rate-limits per-token info requests. Never let that block the independent DEX fallback.
+  if (Date.now() >= logoBlockedUntil && Date.now() >= geckoBlockedUntil) {
+    const geckoCandidates = candidates.slice(0, LOGO_SCAN_LIMIT);
+    for (const token of geckoCandidates) {
+      const result = await trackedFetch("geckoterminal_token_logo",
+        "https://api.geckoterminal.com/api/v2/networks/solana/tokens/" + encodeURIComponent(token.mint) + "/info", true);
+      if (result) {
+        const attrs = result?.data?.attributes || {};
+        const url = attrs.image_url || attrs.imageUrl || attrs.image?.large || attrs.image?.small || attrs.image?.thumb || null;
+        if (url) {
+          token.imageUrl = url;
+          logoCache.set(token.mint, { at: Date.now(), url, source: "geckoterminal" });
+        } else {
+          logoCache.set(token.mint, { at: Date.now(), url: null, source: "geckoterminal-no-image" });
+        }
+      }
+      if (Date.now() < logoBlockedUntil || Date.now() < geckoBlockedUntil) break;
+    }
+  }
+
+  // Use DexScreener's token endpoint as a real fallback, including when GeckoTerminal
+  // is cooling down. This host has separate rate limits and often has pair-level image metadata.
+  const dexCandidates = candidates.filter(token => !token.imageUrl).slice(0, DEX_LOGO_SCAN_LIMIT);
+  for (const token of dexCandidates) {
+    const result = await trackedFetch("dexscreener_token_logo",
+      "https://api.dexscreener.com/latest/dex/tokens/" + encodeURIComponent(token.mint), true);
+    const pairs = Array.isArray(result?.pairs) ? result.pairs : [];
+    const matching = pairs.filter(pair => pair?.chainId === "solana" &&
+      (pair.baseToken?.address === token.mint || pair.quoteToken?.address === token.mint));
+    matching.sort((a, b) => n(b.liquidity?.usd) - n(a.liquidity?.usd));
+    let url = null;
+    for (const pair of matching) {
+      const info = pair?.info || {};
+      url = info.imageUrl || info.icon || info.header || info.openGraph?.image || null;
+      if (url) break;
+    }
+    logoCache.set(token.mint, { at: Date.now(), url, source: url ? "dexscreener" : "no-image" });
     if (url) token.imageUrl = url;
-  }));
+  }
   return tokens;
 }
 
