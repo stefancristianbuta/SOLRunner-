@@ -8,7 +8,7 @@ let lastGeckoRequestAt = 0;
 const MIN_LIQUIDITY_USD = 20_000;
 const MAX_ADDRESSES = 240;
 const SECURITY_CACHE_MS = 10 * 60_000;
-const SECURITY_SCAN_LIMIT = 20;
+const SECURITY_SCAN_LIMIT = 8;
 const securityCache = new Map();
 let cache = { at: 0, payload: null };
 let refreshInFlight = null;
@@ -64,8 +64,8 @@ const performanceTracker = createPerformanceTracker();
 
 async function applySecurityChecks(tokens) {
   const selected = tokens.slice(0, SECURITY_SCAN_LIMIT);
-  for (let offset = 0; offset < selected.length; offset += 4) {
-    const batch = selected.slice(offset, offset + 4);
+  for (let offset = 0; offset < selected.length; offset += 8) {
+    const batch = selected.slice(offset, offset + 8);
     await Promise.all(batch.map(async token => {
       let cached = securityCache.get(token.mint);
       if (!cached || Date.now() - cached.at >= SECURITY_CACHE_MS) {
