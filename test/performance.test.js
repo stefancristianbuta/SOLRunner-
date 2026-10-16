@@ -80,3 +80,28 @@ test("reports median separately from average when returns contain an outlier", (
   assert.equal(five.medianReturnPct, 2);
   assert.ok(five.averageReturnPct > five.medianReturnPct);
 });
+
+
+test("excludes stale observations and reports skipped horizons", () => {
+  const tracker = createPerformanceTracker();
+  const start = 10_000;
+  tracker.observe([{ mint: "late", priceUsd: 1, score: 90 }], start);
+  tracker.observe([{ mint: "late", priceUsd: 1.5, score: 90 }], start + 11 * 60_000);
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.fiveMinutes.samples, 0);
+  assert.equal(snapshot.fiveMinutes.lateSkipped, 1);
+  assert.equal(snapshot.fiveMinutes.maxAllowedDelaySeconds, 300);
+  assert.equal(snapshot.pendingMints, 1);
+});
+
+test("keeps a timely 5-minute sample but excludes a very late 15-minute sample", () => {
+  const tracker = createPerformanceTracker();
+  const start = 20_000;
+  tracker.observe([{ mint: "timely", priceUsd: 1, score: 86 }], start);
+  tracker.observe([{ mint: "timely", priceUsd: 1.1, score: 86 }], start + 6 * 60_000);
+  tracker.observe([{ mint: "timely", priceUsd: 1.2, score: 86 }], start + 26 * 60_000);
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.fiveMinutes.samples, 1);
+  assert.equal(snapshot.fifteenMinutes.samples, 0);
+  assert.equal(snapshot.fifteenMinutes.lateSkipped, 1);
+});
