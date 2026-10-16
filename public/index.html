@@ -45,7 +45,7 @@ function render(){
  if(!rows.length){root.innerHTML='<div class="empty">No live tokens match these filters right now.</div>';return}
  root.innerHTML=rows.map(t=>{
   const change=Number(t.change5m)||0;
-  const logo=t.imageUrl?'<img src="'+esc(t.imageUrl)+'" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.onerror=null;this.parentElement.classList.add(\'logo-fallback\');this.parentElement.textContent=\'◈\'">':'<span class="logo-fallback" aria-label="Token logo unavailable">◈</span>';this.parentElement.textContent=\'◈\'">':"◈";
+  const logo=t.imageUrl?'<img src="'+esc(t.imageUrl)+'" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.onerror=null;this.parentElement.classList.add(\'logo-fallback\');this.parentElement.textContent=\'◈\'">':'<span class="logo-fallback" aria-label="Token logo unavailable">◈</span>';
   const links=[...(Array.isArray(t.websites)?t.websites:[]).map(w=>'<a class="action link" href="'+esc(w.url)+'" target="_blank" rel="noopener">'+esc(w.label||"Website")+' ↗</a>'),...(Array.isArray(t.socials)?t.socials:[]).map(s=>'<a class="action link" href="'+esc(s.url)+'" target="_blank" rel="noopener">'+esc(s.type||"Social")+' ↗</a>')].join("");
   const details=[
    ["Price USD","$"+Number(t.priceUsd||0).toPrecision(9)],["Price native",t.priceNative||"—"],
