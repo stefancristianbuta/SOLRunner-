@@ -281,9 +281,9 @@ async function loadCandidates() {
   }
 
   const tokens = [...best.values()].sort((a, b) => b.score - a.score);
-  await applySecurityChecks(tokens);
-  counts.securityScanned = Math.min(tokens.length, SECURITY_SCAN_LIMIT);
-  counts.securityHighRisk = tokens.filter(token => token.securityStatus === "HIGH_RISK").length;
+  // Keep radar refresh independent of the optional RugCheck API. Token scans call RugCheck on demand.
+  counts.securityScanned = 0;
+  counts.securityHighRisk = 0;
   counts.suspectedPumpPatterns = tokens.filter(token => token.suspectedArtificialPump).length;
   counts.uniqueEligibleTokens = tokens.length;
   performanceTracker.observe(tokens);
