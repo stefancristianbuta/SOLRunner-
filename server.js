@@ -243,9 +243,17 @@ async function loadCandidates() {
       buys24h: n(txns.h24?.buys), sells24h: n(txns.h24?.sells), txns24h: n(txns.h24?.buys) + n(txns.h24?.sells),
       buySellRatio: Number(((buys5 + 1) / (sells5 + 1)).toFixed(2)),
       score: scorePair(pair, ageMin, liquidity, n(volume.m5), buys5, sells5, { buyers: geckoM5.buyers, sellers: geckoM5.sellers }),
+      organicDataCoverage: (n(changes.m5) !== 0 ? 1 : 0) + (n(changes.h1) !== 0 ? 1 : 0) + ((buys5 + sells5) > 0 ? 1 : 0) + (n(volume.m5) > 0 ? 1 : 0) + (n(txns.h1?.buys) + n(txns.h1?.sells) > 0 ? 1 : 0) + (n(geckoM5.buyers) > 0 ? 1 : 0),
+      organicStatus: "ASSESSING",
       riskStatus: marketRisk.suspectedArtificialPump ? "SUSPECTED_PUMP" : "UNVERIFIED", riskFlags: marketRisk.flags, suspectedArtificialPump: marketRisk.suspectedArtificialPump, volumeLiquidityRatio: marketRisk.volumeLiquidityRatio, smartMoney: "NOT VERIFIED", holderCount: null,
       reasons: ["Discovered from live pool/token feeds", buys5 > sells5 ? "More buys than sells in the last 5 minutes" : "Buy pressure is not confirmed", ...marketRisk.flags, "On-chain security report is not part of the radar feed"]
     };
+    candidate.organicStatus = candidate.suspectedArtificialPump ? "FLAGGED" :
+      candidate.score >= 72 && candidate.organicDataCoverage >= 4 && candidate.txns5m >= 12 && candidate.txns1h >= 40 ? "STRONG SIGNAL" :
+      candidate.score >= 58 && candidate.organicDataCoverage >= 3 ? "WATCH" : "INSUFFICIENT DATA";
+    candidate.reasons.push(candidate.organicStatus === "STRONG SIGNAL" ? "Sustained momentum and activity meet the radar's organic-signal heuristic" :
+      candidate.organicStatus === "INSUFFICIENT DATA" ? "Insufficient market data/activity for a stronger organic-momentum signal" :
+      candidate.organicStatus === "WATCH" ? "Some momentum signals present; organic demand not yet strongly supported" : "Risk pattern or insufficient evidence prevents a strong organic label");
     const old = best.get(mint);
     if (!old || candidate.liquidityUsd > old.liquidityUsd) best.set(mint, candidate);
   }
