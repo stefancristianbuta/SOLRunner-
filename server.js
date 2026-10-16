@@ -3,18 +3,18 @@ const path = require("path");
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const CACHE_MS = 60_000;
-const GECKO_MIN_INTERVAL_MS = 2_000;
+const GECKO_MIN_INTERVAL_MS = 6_000;
 const GECKO_429_BACKOFF_MS = 60_000;
-const LOGO_429_BACKOFF_MS = 5 * 60_000;
 let lastGeckoRequestAt = 0;
 let geckoBlockedUntil = 0;
 let logoBlockedUntil = 0;
+let logo429Streak = 0;
 let geckoRequestQueue = Promise.resolve();
 const MIN_LIQUIDITY_USD = 20_000;
 const MAX_ADDRESSES = 240;
 const SECURITY_CACHE_MS = 10 * 60_000;
 const SECURITY_SCAN_LIMIT = 16;
-const LOGO_SCAN_LIMIT = 1;
+const LOGO_SCAN_LIMIT = 2;
 const LOGO_CACHE_MS = 6 * 60 * 60_000;
 const LOGO_NEGATIVE_CACHE_MS = 15 * 60_000;
 const logoCache = new Map();
@@ -30,59 +30,82 @@ app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: tru
 const n = value => Number.isFinite(Number(value)) ? Number(value) : 0;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const addressFromGeckoId = id => String(id || "").startsWith("solana_") ? String(id).slice(7) : "";
+const { parseRetryAfter, logoBackoffMs } = require("./lib/gecko-backoff");
 
 async function trackedFetch(moduleName, url, optional = false) {
-  // Serialize GeckoTerminal request starts. A shared timestamp alone is not sufficient
-  // when several callers reach this function concurrently.
-  if (url.startsWith("https://api.geckoterminal.com/")) {
-    let release;
+  const isGecko = url.startsWith("https://api.geckoterminal.com/");
+  let releaseQueue = null;
+  if (isGecko) {
     const previous = geckoRequestQueue;
-    geckoRequestQueue = new Promise(resolve => { release = resolve; });
+    geckoRequestQueue = new Promise(resolve => { releaseQueue = resolve; });
     await previous;
-    try {
-      const waitMs = Math.max(0, lastGeckoRequestAt + GECKO_MIN_INTERVAL_MS - Date.now(), geckoBlockedUntil - Date.now());
-      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
-      lastGeckoRequestAt = Date.now();
-    } finally {
-      release();
-    }
   }
-  const start = Date.now();
-  const entry = telemetry.modules[moduleName] || { calls: 0, successes: 0, failures: 0, lastMs: null, avgMs: null, lastStatus: "never", lastError: null };
-  entry.calls++;
+  const entry = telemetry.modules[moduleName] || { calls: 0, successes: 0, failures: 0, skipped: 0, lastMs: null, avgMs: null, lastStatus: "never", lastError: null };
   try {
-    const response = await fetch(url, {
-      headers: { accept: "application/json", "user-agent": "SOLRunner/0.4" },
-      signal: AbortSignal.timeout(9000)
-    });
-    if (!response.ok) {
-      const error = new Error("HTTP " + response.status);
-      error.status = response.status;
-      const retryAfter = Number(response.headers.get("retry-after"));
-      error.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : null;
+    if (isGecko) {
+      if (Date.now() < geckoBlockedUntil) {
+        entry.skipped = (entry.skipped || 0) + 1;
+        entry.lastStatus = "degraded";
+        entry.lastError = "Skipped during GeckoTerminal HTTP 429 cooldown";
+        telemetry.modules[moduleName] = entry;
+        return null;
+      }
+      const waitMs = Math.max(0, lastGeckoRequestAt + GECKO_MIN_INTERVAL_MS - Date.now());
+      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+      if (Date.now() < geckoBlockedUntil) {
+        entry.skipped = (entry.skipped || 0) + 1;
+        entry.lastStatus = "degraded";
+        entry.lastError = "Skipped during GeckoTerminal HTTP 429 cooldown";
+        telemetry.modules[moduleName] = entry;
+        return null;
+      }
+      lastGeckoRequestAt = Date.now();
+    }
+    const start = Date.now();
+    entry.calls++;
+    try {
+      const response = await fetch(url, {
+        headers: { accept: "application/json;version=20230203", "user-agent": "SOLRunner/0.4" },
+        signal: AbortSignal.timeout(9000)
+      });
+      if (!response.ok) {
+        const error = new Error("HTTP " + response.status);
+        error.status = response.status;
+        error.retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
+        throw error;
+      }
+      const data = await response.json();
+      const ms = Date.now() - start;
+      entry.successes++;
+      if (moduleName === "geckoterminal_token_logo") {
+        logo429Streak = 0;
+        logoBlockedUntil = 0;
+      }
+      entry.lastMs = ms;
+      entry.avgMs = Math.round((((entry.avgMs || 0) * (entry.successes - 1)) + ms) / entry.successes);
+      entry.lastStatus = "ok";
+      entry.lastError = null;
+      telemetry.modules[moduleName] = entry;
+      return data;
+    } catch (error) {
+      if (isGecko && error.status === 429) {
+        const cooldown = error.retryAfterMs || GECKO_429_BACKOFF_MS;
+        geckoBlockedUntil = Math.max(geckoBlockedUntil, Date.now() + cooldown);
+        if (moduleName === "geckoterminal_token_logo") {
+          logo429Streak++;
+          logoBlockedUntil = Math.max(logoBlockedUntil, Date.now() + logoBackoffMs(logo429Streak), Date.now() + cooldown);
+        }
+      }
+      entry.failures++;
+      entry.lastMs = Date.now() - start;
+      entry.lastStatus = optional ? "degraded" : "error";
+      entry.lastError = String(error.message || error);
+      telemetry.modules[moduleName] = entry;
+      if (optional) return null;
       throw error;
     }
-    const data = await response.json();
-    const ms = Date.now() - start;
-    entry.successes++;
-    entry.lastMs = ms;
-    entry.avgMs = Math.round((((entry.avgMs || 0) * (entry.successes - 1)) + ms) / entry.successes);
-    entry.lastStatus = "ok";
-    entry.lastError = null;
-    telemetry.modules[moduleName] = entry;
-    return data;
-  } catch (error) {
-    if (url.startsWith("https://api.geckoterminal.com/") && error.status === 429) {
-      geckoBlockedUntil = Math.max(geckoBlockedUntil, Date.now() + (error.retryAfterMs || GECKO_429_BACKOFF_MS));
-      if (moduleName === "geckoterminal_token_logo") logoBlockedUntil = Math.max(logoBlockedUntil, Date.now() + LOGO_429_BACKOFF_MS);
-    }
-    entry.failures++;
-    entry.lastMs = Date.now() - start;
-    entry.lastStatus = optional ? "degraded" : "error";
-    entry.lastError = String(error.message || error);
-    telemetry.modules[moduleName] = entry;
-    if (optional) return null;
-    throw error;
+  } finally {
+    if (releaseQueue) releaseQueue();
   }
 }
 
@@ -163,9 +186,10 @@ async function resolveMissingLogos(tokens) {
   }).slice(0, LOGO_SCAN_LIMIT);
   await Promise.all(candidates.map(async token => {
     const result = await trackedFetch("geckoterminal_token_logo",
-      "https://api.geckoterminal.com/api/v2/networks/solana/tokens/" + encodeURIComponent(token.mint), true);
+      "https://api.geckoterminal.com/api/v2/networks/solana/tokens/" + encodeURIComponent(token.mint) + "/info", true);
+    if (!result && (Date.now() < logoBlockedUntil || Date.now() < geckoBlockedUntil)) return;
     const attrs = result?.data?.attributes || {};
-    const url = attrs.image_url || attrs.imageUrl || null;
+    const url = attrs.image_url || attrs.imageUrl || attrs.image?.large || attrs.image?.small || attrs.image?.thumb || null;
     logoCache.set(token.mint, { at: Date.now(), url });
     if (url) token.imageUrl = url;
   }));
@@ -472,7 +496,9 @@ app.get("/api/telemetry", (_req, res) => res.json({
   ok: true, generatedAt: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()),
   cache: { ageSeconds: cache.at ? Math.round((Date.now() - cache.at) / 1000) : null, hasSnapshot: Boolean(cache.payload), stale: !cache.at || Date.now() - cache.at > STALE_AFTER_MS, staleAfterSeconds: STALE_AFTER_MS / 1000, tokenCount: cache.payload?.count || 0 },
   refresh: { intervalSeconds: 60, runs: telemetry.runs, failures: telemetry.failures, lastRunAt: telemetry.lastRunAt, lastSuccessAt: cache.payload?.updatedAt || null, lastSuccessAgeSeconds: cache.at ? Math.floor((Date.now() - cache.at) / 1000) : null, lastDurationMs: telemetry.lastDurationMs, lastError },
-  modules: telemetry.modules, pipeline: telemetry.lastPipeline, performance: performanceTracker.snapshot()
+  modules: telemetry.modules, pipeline: telemetry.lastPipeline,
+  rateLimits: { geckoBlockedForSeconds: Math.max(0, Math.ceil((geckoBlockedUntil - Date.now()) / 1000)), logoBlockedForSeconds: Math.max(0, Math.ceil((logoBlockedUntil - Date.now()) / 1000)), logo429Streak },
+  performance: performanceTracker.snapshot()
 }));
 app.get("/api/status", (_req, res) => { const ageMs = cache.at ? Date.now() - cache.at : null; const stale = ageMs === null || ageMs > STALE_AFTER_MS || Boolean(lastError); res.status(stale ? 503 : 200).json({ ok: !stale, lastUpdated: cache.payload?.updatedAt || null, snapshotAgeSeconds: ageMs === null ? null : Math.floor(ageMs / 1000), stale, lastError, hasSnapshot: Boolean(cache.payload), refreshInFlight: Boolean(refreshInFlight) }); });
 app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
