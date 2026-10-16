@@ -29,6 +29,7 @@ const telemetry = { lastRunAt: null, lastDurationMs: null, runs: 0, failures: 0,
 app.disable("x-powered-by");
 app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true, setHeaders(res, filePath) { if (filePath.endsWith(".html")) res.setHeader("Cache-Control", "no-store, max-age=0, must-revalidate"); } }));
 const n = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+const safeImageUrl = value => { if (typeof value !== "string" || !value.trim()) return null; try { const parsed = new URL(value.trim()); return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null; } catch { return null; } };
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const addressFromGeckoId = id => String(id || "").startsWith("solana_") ? String(id).slice(7) : "";
 const { parseRetryAfter, logoBackoffMs } = require("./lib/gecko-backoff");
