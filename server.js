@@ -89,7 +89,7 @@ async function applySecurityChecks(tokens) {
       if (critical) {
         // Keep on-chain security findings separate from market-pattern pump heuristics.
         token.securityStatus = "HIGH_RISK";
-        token.securityReasons = [...flags, ...(rugReport?.rugged ? ["RugCheck marks this token as rugged"] : [])];
+        token.securityReasons = [...flags, ...(report?.rugged ? ["RugCheck marks this token as rugged"] : [])];
         token.reasons = [...(token.reasons || []), "RugCheck reported high-risk security signals"];
       } else {
         token.securityReasons = flags;
