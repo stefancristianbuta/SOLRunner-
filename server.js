@@ -56,6 +56,7 @@ async function trackedFetch(moduleName, url, optional = false) {
 
 const { scorePair } = require("./lib/score");
 const { createPerformanceTracker } = require("./lib/performance");
+const { assessMarketRisk } = require("./lib/risk");
 const performanceTracker = createPerformanceTracker();
 
 async function loadCandidates() {
@@ -183,6 +184,7 @@ async function loadCandidates() {
     const geckoSignal = geckoByAddress.get(mint) || {};
     const geckoM5 = geckoSignal.txns?.m5 || {};
     const geckoH1 = geckoSignal.txns?.h1 || {};
+    const marketRisk = assessMarketRisk({ change5m: n(changes.m5), volume5m: n(volume.m5), liquidityUsd: liquidity, buys5m: buys5, sells5m: sells5, txns5m: buys5 + sells5, uniqueBuyers5m: n(geckoM5.buyers) || null });
     const candidate = {
       symbol: String(pair.baseToken.symbol || "UNKNOWN").slice(0, 24),
       name: String(pair.baseToken.name || pair.baseToken.symbol || "Unknown token").slice(0, 80),
@@ -204,8 +206,8 @@ async function loadCandidates() {
       buys24h: n(txns.h24?.buys), sells24h: n(txns.h24?.sells), txns24h: n(txns.h24?.buys) + n(txns.h24?.sells),
       buySellRatio: Number(((buys5 + 1) / (sells5 + 1)).toFixed(2)),
       score: scorePair(pair, ageMin, liquidity, n(volume.m5), buys5, sells5, { buyers: geckoM5.buyers, sellers: geckoM5.sellers }),
-      riskStatus: "UNVERIFIED", smartMoney: "NOT VERIFIED", holderCount: null,
-      reasons: ["Discovered from live pool/token feeds", buys5 > sells5 ? "More buys than sells in the last 5 minutes" : "Buy pressure is not confirmed", "Security and wallet attribution are not audited by this feed"]
+      riskStatus: marketRisk.suspectedArtificialPump ? "SUSPECTED_PUMP" : "UNVERIFIED", riskFlags: marketRisk.flags, suspectedArtificialPump: marketRisk.suspectedArtificialPump, volumeLiquidityRatio: marketRisk.volumeLiquidityRatio, smartMoney: "NOT VERIFIED", holderCount: null,
+      reasons: ["Discovered from live pool/token feeds", buys5 > sells5 ? "More buys than sells in the last 5 minutes" : "Buy pressure is not confirmed", ...marketRisk.flags, "On-chain security report is not part of the radar feed"]
     };
     const old = best.get(mint);
     if (!old || candidate.liquidityUsd > old.liquidityUsd) best.set(mint, candidate);
@@ -218,6 +220,7 @@ async function loadCandidates() {
     const buys5 = n(tx.m5?.buys), sells5 = n(tx.m5?.sells);
     const pairLike = { priceChange: { m5: g.change5m } };
     const score = scorePair(pairLike, g.ageMin, g.liquidityUsd, g.volume5m, buys5, sells5, { buyers: tx.m5?.buyers, sellers: tx.m5?.sellers });
+    const marketRisk = assessMarketRisk({ change5m: g.change5m, volume5m: g.volume5m, liquidityUsd: g.liquidityUsd, buys5m: buys5, sells5m: sells5, txns5m: buys5 + sells5, uniqueBuyers5m: tx.m5?.buyers });
     best.set(mint, {
       symbol: "NEW", name: g.name.split(" / ")[0] || "New Solana token", mint,
       pairAddress: g.pairAddress, dexId: g.dexId, chainId: "solana",
@@ -234,8 +237,8 @@ async function loadCandidates() {
       buys6h: n(tx.h6?.buys), sells6h: n(tx.h6?.sells), txns6h: n(tx.h6?.buys) + n(tx.h6?.sells),
       buys24h: n(tx.h24?.buys), sells24h: n(tx.h24?.sells), txns24h: n(tx.h24?.buys) + n(tx.h24?.sells),
       buySellRatio: Number(((buys5 + 1) / (sells5 + 1)).toFixed(2)), score,
-      riskStatus: "UNVERIFIED", smartMoney: "NOT VERIFIED", holderCount: null,
-      reasons: ["Fresh pool discovered by GeckoTerminal", "DexScreener pair metadata not indexed yet; price fields may be incomplete", "Security and sellability not verified"]
+      riskStatus: marketRisk.suspectedArtificialPump ? "SUSPECTED_PUMP" : "UNVERIFIED", riskFlags: marketRisk.flags, suspectedArtificialPump: marketRisk.suspectedArtificialPump, volumeLiquidityRatio: marketRisk.volumeLiquidityRatio, smartMoney: "NOT VERIFIED", holderCount: null,
+      reasons: ["Fresh pool discovered by GeckoTerminal", "DexScreener pair metadata not indexed yet; price fields may be incomplete", ...marketRisk.flags, "Security and sellability not verified"]
     });
     counts.fallbackGeckoTokens++;
   }
@@ -252,6 +255,51 @@ async function loadCandidates() {
   return tokens;
 }
 
+app.get("/api/scan", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const mint = String(req.query.mint || "").trim();
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) {
+    return res.status(400).json({ ok: false, error: "Enter a valid Solana mint address (base58, 32–44 characters)." });
+  }
+  const [rugReport, pairData] = await Promise.all([
+    trackedFetch("rugcheck_scan", "https://api.rugcheck.xyz/v1/tokens/" + encodeURIComponent(mint) + "/report/summary", true),
+    trackedFetch("dexscreener_scan", "https://api.dexscreener.com/latest/dex/tokens/" + encodeURIComponent(mint), true)
+  ]);
+  const pairs = Array.isArray(pairData?.pairs) ? pairData.pairs.filter(pair => pair.chainId === "solana" && pair.baseToken?.address === mint) : [];
+  pairs.sort((a, b) => n(b.liquidity?.usd) - n(a.liquidity?.usd));
+  const pair = pairs[0] || null;
+  const marketRisk = pair ? assessMarketRisk({
+    change5m: pair.priceChange?.m5, volume5m: pair.volume?.m5, liquidityUsd: pair.liquidity?.usd,
+    buys5m: pair.txns?.m5?.buys, sells5m: pair.txns?.m5?.sells,
+    txns5m: n(pair.txns?.m5?.buys) + n(pair.txns?.m5?.sells)
+  }) : { flags: [], suspectedArtificialPump: false, volumeLiquidityRatio: null };
+  const risks = Array.isArray(rugReport?.risks) ? rugReport.risks.map(r => ({
+    name: String(r.name || "Risk flag"), level: String(r.level || "unknown"),
+    description: String(r.description || ""), value: String(r.value || "")
+  })) : [];
+  const normalizedScore = Number.isFinite(Number(rugReport?.score_normalised)) ? Number(rugReport.score_normalised) : null;
+  const critical = risks.some(r => /danger|critical|high/i.test(r.level)) ||
+    risks.some(r => /rugged|honeypot|mint authority|freeze authority/i.test(r.name));
+  const rugStatus = rugReport ? (rugReport.rugged || critical || (normalizedScore !== null && normalizedScore >= 70) ? "HIGH RISK" : (normalizedScore !== null && normalizedScore >= 35 || risks.length ? "CAUTION" : "NO MAJOR FLAGS REPORTED")) : "UNAVAILABLE";
+  return res.json({
+    ok: true, mint, scannedAt: new Date().toISOString(),
+    token: pair ? {
+      name: pair.baseToken?.name || "Unknown token", symbol: pair.baseToken?.symbol || "UNKNOWN",
+      priceUsd: n(pair.priceUsd), change5m: n(pair.priceChange?.m5), change1h: n(pair.priceChange?.h1),
+      liquidityUsd: n(pair.liquidity?.usd), volume5m: n(pair.volume?.m5), volume24h: n(pair.volume?.h24),
+      buys5m: n(pair.txns?.m5?.buys), sells5m: n(pair.txns?.m5?.sells), url: pair.url || "https://dexscreener.com/solana/" + (pair.pairAddress || mint)
+    } : null,
+    marketRisk,
+    security: {
+      status: rugStatus, available: Boolean(rugReport), normalizedScore,
+      rawScore: Number.isFinite(Number(rugReport?.score)) ? Number(rugReport.score) : null,
+      rugged: typeof rugReport?.rugged === "boolean" ? rugReport.rugged : null,
+      risks, liquidityLockedPct: Number.isFinite(Number(rugReport?.lpLockedPct)) ? Number(rugReport.lpLockedPct) : null,
+      note: rugReport ? "RugCheck summary; a clean report does not guarantee safety." : "RugCheck report unavailable; do not treat this token as verified safe."
+    },
+    sources: { rugcheck: "https://rugcheck.xyz/tokens/" + mint, dexscreener: "https://dexscreener.com/solana/" + mint }
+  });
+});
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "SOLRunner", dataProvider: "GeckoTerminal discovery + DexScreener search/market APIs", cached: Boolean(cache.payload), lastUpdated: cache.at || null }));
 app.get("/api/tokens", async (_req, res) => {
   res.set("Cache-Control", "no-store");
