@@ -46,7 +46,7 @@ function render(){
  if(!rows.length){root.innerHTML='<div class="empty">No live tokens match these filters right now.</div>';return}
  root.innerHTML=rows.map(t=>{
   const change=Number(t.change5m)||0;
-  const logoUrls=[t.imageUrl,t.header,t.openGraph?.image].filter((url,index,all)=>typeof url==="string"&&/^https?:\\/\\//i.test(url)&&url&&all.indexOf(url)===index);
+  const logoUrls=[t.imageUrl,t.header,t.openGraph?.image].filter((url,index,all)=>typeof url==="string"&&(url.startsWith("https://")||url.startsWith("http://"))&&all.indexOf(url)===index);
   const logo=logoUrls.length?'<img src="'+esc(logoUrls[0])+'" data-fallbacks="'+esc(logoUrls.slice(1).join("|"))+'" alt="" loading="lazy" referrerpolicy="no-referrer">':'<span class="logo-fallback" aria-label="Token logo unavailable">◈</span>';
   const links=[...(Array.isArray(t.websites)?t.websites:[]).map(w=>'<a class="action link" href="'+esc(w.url)+'" target="_blank" rel="noopener">'+esc(w.label||"Website")+' ↗</a>'),...(Array.isArray(t.socials)?t.socials:[]).map(s=>'<a class="action link" href="'+esc(s.url)+'" target="_blank" rel="noopener">'+esc(s.type||"Social")+' ↗</a>')].join("");
   const details=[
