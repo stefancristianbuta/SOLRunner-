@@ -158,14 +158,15 @@ async function applySecurityChecks(tokens) {
       token.securityReasons = assessment.reasons;
     }));
   }
+  const { classifyCandidateSignals } = require("./lib/signals");
   for (const token of tokens) {
-    token.riskFlags = [...new Set([...(token.riskFlags || []), ...(token.securityFlags || [])])];
-    if (token.securityStatus === "HIGH_RISK" || token.suspectedArtificialPump) token.organicStatus = "FLAGGED";
-    else if (token.securityStatus === "NO_MAJOR_FLAGS" && token.score >= 72 &&
-      token.organicDataCoverage >= 4 && token.txns5m >= 12 && token.txns1h >= 40) token.organicStatus = "STRONG SIGNAL";
-    else if (token.score >= 58 && token.organicDataCoverage >= 3) token.organicStatus = "WATCH";
-    else token.organicStatus = "INSUFFICIENT DATA";
-    if (token.securityStatus === "HIGH_RISK") token.reasons = [...(token.reasons || []), "RugCheck reported high-risk security signals"];
+    // Keep market manipulation signals and RugCheck security findings independent.
+    const signal = classifyCandidateSignals(token);
+    token.organicStatus = signal.organicStatus;
+    token.shortlistEligible = signal.shortlistEligible;
+    token.shortlistStatus = signal.shortlistStatus;
+    token.marketRiskFlags = [...(token.riskFlags || [])];
+    if (token.securityStatus === "HIGH_RISK") token.reasons = [...(token.reasons || []), "RugCheck reported high-risk security signals; this is separate from the market momentum score"];
     else if (token.securityStatus === "UNAVAILABLE") token.reasons = [...(token.reasons || []), "Security unverified: RugCheck has not returned a fresh report"];
   }
   return tokens;
@@ -174,6 +175,13 @@ async function applySecurityChecks(tokens) {
 async function resolveMissingLogos(tokens) {
   const now = Date.now();
   for (const token of tokens) {
+    const rawImageUrl = token.imageUrl;
+    token.imageUrl = safeImageUrl(rawImageUrl);
+    token.header = safeImageUrl(token.header);
+    if (token.openGraph && typeof token.openGraph === "object") {
+      token.openGraph = { ...token.openGraph, image: safeImageUrl(token.openGraph.image) };
+    }
+    if (rawImageUrl && !token.imageUrl) telemetry.logoResolution.invalidImageUrl++;
     if (token.imageUrl) {
       logoCache.set(token.mint, { at: now, url: token.imageUrl, source: "market-data" });
     } else {
@@ -393,7 +401,7 @@ async function loadCandidates() {
       name: String(pair.baseToken.name || pair.baseToken.symbol || "Unknown token").slice(0, 80),
       mint, pairAddress: pair.pairAddress, dexId: pair.dexId || "unknown", chainId: pair.chainId || "solana",
       url: pair.url || "https://dexscreener.com/solana/" + pair.pairAddress,
-      imageUrl: tokenMetadata.get(mint)?.icon || info.imageUrl || info.header || info.openGraph?.image || null, header: tokenMetadata.get(mint)?.header || info.header || info.openGraph?.image || null, openGraph: info.openGraph || null,
+      imageUrl: safeImageUrl(tokenMetadata.get(mint)?.icon || info.imageUrl || info.header || info.openGraph?.image || null), header: safeImageUrl(tokenMetadata.get(mint)?.header || info.header || info.openGraph?.image || null), openGraph: info.openGraph && typeof info.openGraph === "object" ? { ...info.openGraph, image: safeImageUrl(info.openGraph.image) } : null,
       websites: (Array.isArray(info.websites) ? info.websites : []).slice(0, 8),
       socials: (Array.isArray(info.socials) ? info.socials : []).slice(0, 10),
       sources: [...(sourceMap.get(mint) || [])],
@@ -436,7 +444,7 @@ async function loadCandidates() {
       symbol: "NEW", name: g.name.split(" / ")[0] || "New Solana token", mint,
       pairAddress: g.pairAddress, dexId: g.dexId, chainId: "solana",
       url: "https://www.geckoterminal.com/solana/pools/" + g.pairAddress,
-      imageUrl: tokenMetadata.get(mint)?.icon || null, header: tokenMetadata.get(mint)?.header || null, websites: [], socials: [], sources: ["geckoterminal_new_pool"],
+      imageUrl: safeImageUrl(tokenMetadata.get(mint)?.icon || null), header: safeImageUrl(tokenMetadata.get(mint)?.header || null), websites: [], socials: [], sources: ["geckoterminal_new_pool"],
       ageMin: Math.round(g.ageMin * 10) / 10, pairCreatedAt: g.poolCreatedAt,
       priceUsd: 0, priceNative: null, marketCapUsd: 0, fdvUsd: 0,
       change5m: g.change5m, change1h: g.change1h, change6h: g.change6h, change24h: g.change24h,
