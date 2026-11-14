@@ -39,7 +39,7 @@ function render(){
  else if(activeFilter==="strong")rows=rows.filter(t=>t.shortlistEligible===true);
  else rows=rows.filter(t=>!t.suspectedArtificialPump&&t.securityStatus!=="HIGH_RISK");
  rows.sort((a,b)=>sort==="volume"?b.volume5m-a.volume5m:sort==="liquidity"?b.liquidityUsd-a.liquidityUsd:sort==="age"?a.ageMin-b.ageMin:b.score-a.score);
- $("#eligible").textContent=tokens.filter(t=>t.liquidityUsd>=20000&&!t.suspectedArtificialPump).length;
+ $("#eligible").textContent=tokens.filter(t=>t.liquidityUsd>=20000&&!t.suspectedArtificialPump&&t.securityStatus!=="HIGH_RISK").length;
  $("#high").textContent=tokens.filter(t=>t.shortlistEligible===true&&t.liquidityUsd>=20000).length;
  $("#count").textContent=rows.length+" tokens";
  const root=$("#tokens");
