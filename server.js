@@ -147,10 +147,19 @@ async function applySecurityChecks(tokens) {
       const report = await trackedFetch("rugcheck_radar",
         "https://api.rugcheck.xyz/v1/tokens/" + encodeURIComponent(token.mint) + "/report/summary", true);
       if (!report) { securityCache.delete(token.mint); return; }
+      const assessment = classifySecurityReport(report);
+      if (assessment.status === "UNAVAILABLE") {
+        securityCache.delete(token.mint);
+        token.securityCheckedAt = null;
+        token.securityStatus = "UNAVAILABLE";
+        token.securityScore = null;
+        token.securityFlags = [];
+        token.securityReasons = assessment.reasons;
+        return;
+      }
       const checkedAt = Date.now();
       securityCache.set(token.mint, { at: checkedAt, report });
       securityChecksThisRefresh++;
-      const assessment = classifySecurityReport(report);
       token.securityCheckedAt = new Date(checkedAt).toISOString();
       token.securityStatus = assessment.status;
       token.securityScore = assessment.score;
@@ -474,7 +483,10 @@ async function loadCandidates() {
   counts.securityUnavailable = tokens.filter(token => token.securityStatus === "UNAVAILABLE").length;
   counts.securityHighRisk = tokens.filter(token => token.securityStatus === "HIGH_RISK").length;
   counts.securityCaution = tokens.filter(token => token.securityStatus === "CAUTION").length;
-  counts.suspectedPumpPatterns = tokens.filter(token => (token.riskFlags || []).length > 0 && token.suspectedArtificialPump).length;
+  counts.suspectedPumpPatterns = tokens.filter(token =>
+    (Array.isArray(token.riskFlags) && token.riskFlags.length > 0) ||
+    (Array.isArray(token.marketRiskFlags) && token.marketRiskFlags.length > 0)
+  ).length;
   counts.uniqueEligibleTokens = tokens.length;
   performanceTracker.observe(tokens);
   counts.tokensWithLogo = tokens.filter(token => Boolean(token.imageUrl)).length;

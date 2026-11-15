@@ -3,6 +3,11 @@ const assert = require("node:assert/strict");
 const { classifySecurityReport } = require("../lib/security");
 
 test("missing RugCheck report stays unverified", () => assert.equal(classifySecurityReport(null).status, "UNAVAILABLE"));
+test("empty and incomplete RugCheck reports stay unavailable", () => {
+  assert.equal(classifySecurityReport({}).status, "UNAVAILABLE");
+  assert.equal(classifySecurityReport({ risks: [] }).status, "UNAVAILABLE");
+  assert.equal(classifySecurityReport({ score_normalised: "" }).status, "UNAVAILABLE");
+});
 test("normalized high risk score is classified high risk", () => assert.equal(classifySecurityReport({ score_normalised: 70, risks: [] }).status, "HIGH_RISK"));
 test("authority mention alone does not create a false high-risk classification", () => {
   const result = classifySecurityReport({ score_normalised: 12, risks: [{ name: "Mint Authority", level: "warn", description: "Mint authority is disabled and revoked" }] });
