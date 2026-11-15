@@ -28,6 +28,25 @@ test("market manipulation flags independently block strong organic status", () =
   assert.equal(result.shortlistEligible, false);
 });
 
+test("any individual market risk flag blocks strong status and shortlist", () => {
+  const result = classifyCandidateSignals({
+    ...strong, securityStatus: "NO_MAJOR_FLAGS",
+    suspectedArtificialPump: false,
+    riskFlags: ["Highly one-sided buy flow"]
+  });
+  assert.equal(result.organicStatus, "FLAGGED");
+  assert.equal(result.shortlistEligible, false);
+});
+
+test("marketRiskFlags also block shortlist when riskFlags are absent", () => {
+  const result = classifyCandidateSignals({
+    ...strong, securityStatus: "NO_MAJOR_FLAGS",
+    marketRiskFlags: ["Weak buyer breadth"]
+  });
+  assert.equal(result.organicStatus, "FLAGGED");
+  assert.equal(result.shortlistEligible, false);
+});
+
 test("watch and insufficient data remain separate categories", () => {
   assert.equal(classifyCandidateSignals({ score: 65, organicDataCoverage: 3, securityStatus: "NO_MAJOR_FLAGS" }).organicStatus, "WATCH");
   assert.equal(classifyCandidateSignals({ score: 50, organicDataCoverage: 2 }).organicStatus, "INSUFFICIENT DATA");
